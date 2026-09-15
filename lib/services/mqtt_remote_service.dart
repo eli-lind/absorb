@@ -652,7 +652,7 @@ class MqttRemoteService extends ChangeNotifier {
 
   Map<String, dynamic> buildSleepTimerNumberDiscoveryPayload() {
     return {
-      'name': 'Absorb ($_slug) Sleep Timer',
+      'name': 'Absorb ($_slug) Sleep Timer Duration',
       'unique_id': 'absorb_${_slug}_sleep_timer',
       'command_topic': sleepTimerDurationSetTopic,
       'min': minSleepDurationMinutes,
@@ -667,6 +667,13 @@ class MqttRemoteService extends ChangeNotifier {
       'device': buildDeviceMetadata(),
     };
   }
+
+  List<String> get allDiscoveryTopics => [
+        discoveryMediaPlayerTopic,
+        discoverySleepTimerSensorTopic,
+        discoverySleepChapterButtonTopic,
+        discoverySleepTimerNumberTopic,
+      ];
 
   void publishDiscovery() {
     _clientAdapter.publish(
@@ -692,10 +699,9 @@ class MqttRemoteService extends ChangeNotifier {
   }
 
   void unpublishDiscovery() {
-    _clientAdapter.publish(discoveryMediaPlayerTopic, '', retain: true);
-    _clientAdapter.publish(discoverySleepTimerSensorTopic, '', retain: true);
-    _clientAdapter.publish(discoverySleepChapterButtonTopic, '', retain: true);
-    _clientAdapter.publish(discoverySleepTimerNumberTopic, '', retain: true);
+    for (final topic in allDiscoveryTopics) {
+      _clientAdapter.publish(topic, '', retain: true);
+    }
   }
 
   Future<void> _handleInboundMessage(String topic, String payload) async {
@@ -963,9 +969,9 @@ class MqttRemoteService extends ChangeNotifier {
     final val = num.tryParse(trimmed);
     if (val != null && val.isFinite) {
       final minutes = val.round();
-      if (minutes <= 0) {
+      if (minutes == 0) {
         _sleepTimerService.cancel();
-      } else {
+      } else if (minutes > 0) {
         _sleepTimerService.setTimeSleep(
           Duration(minutes: minutes.clamp(1, maxSleepDurationMinutes)),
         );

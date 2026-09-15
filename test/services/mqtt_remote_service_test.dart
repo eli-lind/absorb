@@ -1966,6 +1966,7 @@ void main() {
       expect(discoveryMsg.retain, isTrue);
 
       final payload = jsonDecode(discoveryMsg.payload) as Map<String, dynamic>;
+      expect(payload['name'], equals('Absorb (kids_tablet) Sleep Timer Duration'));
       expect(payload['unique_id'], equals('absorb_kids_tablet_sleep_timer'));
       expect(payload['command_topic'], equals('absorb/kids_tablet/sleep_timer/duration/set'));
       expect(payload['min'], equals(0));
@@ -2025,7 +2026,7 @@ void main() {
       verify(() => mockSleepTimerService.setTimeSleep(const Duration(minutes: 120))).called(1);
     });
 
-    test('inbound 0 duration payload cancels active sleep timer', () async {
+    test('inbound 0 duration payload cancels active sleep timer while negative durations are ignored', () async {
       await service.connect(
         host: '192.168.1.50',
         slug: 'kids_tablet',
@@ -2044,6 +2045,15 @@ void main() {
       );
       await Future<void>.delayed(Duration.zero);
       verify(() => mockSleepTimerService.cancel()).called(1);
+
+      // Negative numbers should not cancel or trigger sleep timer
+      fakeMqttClient.simulateInboundMessage(
+        'absorb/kids_tablet/sleep_timer/duration/set',
+        '-10',
+      );
+      await Future<void>.delayed(Duration.zero);
+      verifyNever(() => mockSleepTimerService.cancel());
+      verifyNever(() => mockSleepTimerService.setTimeSleep(any()));
     });
 
     test('unpublishDiscovery emits empty retained discovery messages across discovery topics', () async {
