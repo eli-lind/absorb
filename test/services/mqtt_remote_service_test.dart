@@ -1,9 +1,59 @@
+import 'dart:async';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mocktail/mocktail.dart';
 import 'package:absorb/services/mqtt_remote_service.dart';
 import 'package:absorb/services/audio_player_service.dart';
 
 class MockAudioPlayerService extends Mock implements AudioPlayerService {}
+
+class FakeMqttClientAdapter implements MqttClientAdapter {
+  MqttConnectionConfig? lastConfig;
+  bool _isConnected = false;
+
+  final List<String> subscriptions = [];
+  final List<PublishedMqttMessage> publishedMessages = [];
+  final StreamController<({String topic, String payload})> _incomingController =
+      StreamController<({String topic, String payload})>.broadcast();
+
+  @override
+  Stream<({String topic, String payload})> get incomingMessages =>
+      _incomingController.stream;
+
+  @override
+  bool get isConnected => _isConnected;
+
+  @override
+  Future<bool> connect(MqttConnectionConfig config) async {
+    lastConfig = config;
+    _isConnected = true;
+    return true;
+  }
+
+  @override
+  void disconnect() {
+    _isConnected = false;
+  }
+
+  @override
+  void subscribe(String topic) {
+    subscriptions.add(topic);
+  }
+
+  @override
+  void publish(String topic, String payload, {bool retain = false}) {
+    publishedMessages.add(
+      PublishedMqttMessage(topic: topic, payload: payload, retain: retain),
+    );
+  }
+
+  void simulateInboundMessage(String topic, String payload) {
+    _incomingController.add((topic: topic, payload: payload));
+  }
+
+  void dispose() {
+    _incomingController.close();
+  }
+}
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -30,6 +80,7 @@ void main() {
 
     tearDown(() {
       service.dispose();
+      fakeMqttClient.dispose();
     });
 
     test('configures clean session and LWT to publish offline retained to absorb/<slug>/status', () async {
@@ -39,12 +90,27 @@ void main() {
         slug: 'kids_tablet',
       );
 
-      expect(fakeMqttClient.lastHost, equals('192.168.1.50'));
-      expect(fakeMqttClient.lastPort, equals(1883));
-      expect(fakeMqttClient.cleanSession, isTrue);
-      expect(fakeMqttClient.willTopic, equals('absorb/kids_tablet/status'));
-      expect(fakeMqttClient.willMessage, equals('offline'));
-      expect(fakeMqttClient.willRetain, isTrue);
+      final config = fakeMqttClient.lastConfig!;
+      expect(config.host, equals('192.168.1.50'));
+      expect(config.port, equals(1883));
+      expect(config.cleanSession, isTrue);
+      expect(config.willTopic, equals('absorb/kids_tablet/status'));
+      expect(config.willMessage, equals('offline'));
+      expect(config.willRetain, isTrue);
+    });
+
+    test('sanitizes slug and resolves TLS default port to 8883', () async {
+      await service.connect(
+        host: '192.168.1.50',
+        slug: 'Kids Room / Tablet #1!',
+        useTls: true,
+      );
+
+      final config = fakeMqttClient.lastConfig!;
+      expect(config.port, equals(8883));
+      expect(config.useTls, isTrue);
+      expect(service.slug, equals('kids_room___tablet__1_'));
+      expect(config.willTopic, equals('absorb/kids_room___tablet__1_/status'));
     });
 
     test('publishes retained online to absorb/<slug>/status upon successful connection', () async {
@@ -71,7 +137,7 @@ void main() {
       expect(fakeMqttClient.subscriptions, contains('absorb/kids_tablet/set'));
     });
 
-    test('dispatches PLAY command to AudioPlayerService when received on absorb/<slug>/set', () async {
+    test('dispatches PLAY command to AudioPlayerService with fromUi: false when received on absorb/<slug>/set', () async {
       await service.connect(
         host: '192.168.1.50',
         port: 1883,
@@ -81,7 +147,7 @@ void main() {
       fakeMqttClient.simulateInboundMessage('absorb/kids_tablet/set', 'PLAY');
       await Future<void>.delayed(Duration.zero);
 
-      verify(() => mockAudioPlayerService.play(logDetail: any(named: 'logDetail'), fromUi: any(named: 'fromUi'))).called(1);
+      verify(() => mockAudioPlayerService.play(logDetail: any(named: 'logDetail'), fromUi: false)).called(1);
     });
 
     test('dispatches PAUSE command to AudioPlayerService when received on absorb/<slug>/set', () async {
@@ -112,6 +178,7 @@ void main() {
         (m) => m.topic == 'absorb/kids_tablet/state',
       );
       expect(stateMsg.payload, equals('playing'));
+      expect(stateMsg.retain, isFalse);
 
       // Transition to paused
       when(() => mockAudioPlayerService.isPlaying).thenReturn(false);
@@ -121,6 +188,7 @@ void main() {
         (m) => m.topic == 'absorb/kids_tablet/state',
       );
       expect(stateMsg.payload, equals('paused'));
+      expect(stateMsg.retain, isFalse);
     });
   });
 }

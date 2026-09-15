@@ -17,97 +17,39 @@ class PublishedMqttMessage {
   });
 }
 
-abstract class MqttClientAdapter {
-  Future<bool> connect({
-    required String host,
-    required int port,
-    required String identifier,
-    required String willTopic,
-    required String willMessage,
-    required bool willRetain,
-    required bool cleanSession,
-    String? username,
-    String? password,
-    bool useTls,
-  });
+class MqttConnectionConfig {
+  final String host;
+  final int port;
+  final String identifier;
+  final String willTopic;
+  final String willMessage;
+  final bool willRetain;
+  final bool cleanSession;
+  final String? username;
+  final String? password;
+  final bool useTls;
 
+  const MqttConnectionConfig({
+    required this.host,
+    required this.port,
+    required this.identifier,
+    required this.willTopic,
+    required this.willMessage,
+    this.willRetain = true,
+    this.cleanSession = true,
+    this.username,
+    this.password,
+    this.useTls = false,
+  });
+}
+
+abstract class MqttClientAdapter {
+  Future<bool> connect(MqttConnectionConfig config);
   void disconnect();
   void subscribe(String topic);
   void publish(String topic, String payload, {bool retain = false});
   Stream<({String topic, String payload})> get incomingMessages;
   bool get isConnected;
-}
-
-class FakeMqttClientAdapter implements MqttClientAdapter {
-  String? lastHost;
-  int? lastPort;
-  String? lastIdentifier;
-  String? willTopic;
-  String? willMessage;
-  bool willRetain = false;
-  bool cleanSession = false;
-  bool _isConnected = false;
-
-  final List<String> subscriptions = [];
-  final List<PublishedMqttMessage> publishedMessages = [];
-  final StreamController<({String topic, String payload})> _incomingController =
-      StreamController<({String topic, String payload})>.broadcast();
-
-  @override
-  Stream<({String topic, String payload})> get incomingMessages =>
-      _incomingController.stream;
-
-  @override
-  bool get isConnected => _isConnected;
-
-  @override
-  Future<bool> connect({
-    required String host,
-    required int port,
-    required String identifier,
-    required String willTopic,
-    required String willMessage,
-    required bool willRetain,
-    required bool cleanSession,
-    String? username,
-    String? password,
-    bool useTls = false,
-  }) async {
-    lastHost = host;
-    lastPort = port;
-    lastIdentifier = identifier;
-    this.willTopic = willTopic;
-    this.willMessage = willMessage;
-    this.willRetain = willRetain;
-    this.cleanSession = cleanSession;
-    _isConnected = true;
-    return true;
-  }
-
-  @override
-  void disconnect() {
-    _isConnected = false;
-  }
-
-  @override
-  void subscribe(String topic) {
-    subscriptions.add(topic);
-  }
-
-  @override
-  void publish(String topic, String payload, {bool retain = false}) {
-    publishedMessages.add(
-      PublishedMqttMessage(topic: topic, payload: payload, retain: retain),
-    );
-  }
-
-  void simulateInboundMessage(String topic, String payload) {
-    _incomingController.add((topic: topic, payload: payload));
-  }
-
-  void dispose() {
-    _incomingController.close();
-  }
 }
 
 class DefaultMqttClientAdapter implements MqttClientAdapter {
@@ -125,43 +67,37 @@ class DefaultMqttClientAdapter implements MqttClientAdapter {
       _client?.connectionStatus?.state == MqttConnectionState.connected;
 
   @override
-  Future<bool> connect({
-    required String host,
-    required int port,
-    required String identifier,
-    required String willTopic,
-    required String willMessage,
-    required bool willRetain,
-    required bool cleanSession,
-    String? username,
-    String? password,
-    bool useTls = false,
-  }) async {
-    final client = MqttServerClient.withPort(host, identifier, port);
-    client.secure = useTls;
+  Future<bool> connect(MqttConnectionConfig config) async {
+    final client = MqttServerClient.withPort(
+      config.host,
+      config.identifier,
+      config.port,
+    );
+    client.secure = config.useTls;
     client.keepAlivePeriod = 20;
     client.logging(on: false);
 
     var connMess = MqttConnectMessage()
-        .withClientIdentifier(identifier)
-        .withWillTopic(willTopic)
-        .withWillMessage(willMessage)
+        .withClientIdentifier(config.identifier)
+        .withWillTopic(config.willTopic)
+        .withWillMessage(config.willMessage)
         .withWillQos(MqttQos.atLeastOnce);
 
-    if (willRetain) {
+    if (config.willRetain) {
       connMess = connMess.withWillRetain();
     }
-    if (cleanSession) {
+    if (config.cleanSession) {
       connMess = connMess.startClean();
     }
-    if (username != null && username.isNotEmpty) {
-      connMess = connMess.authenticateAs(username, password ?? '');
+    final user = config.username;
+    if (user != null && user.isNotEmpty) {
+      connMess = connMess.authenticateAs(user, config.password ?? '');
     }
 
     client.connectionMessage = connMess;
 
     try {
-      final status = await client.connect(username, password);
+      final status = await client.connect(config.username, config.password);
       if (status?.state == MqttConnectionState.connected) {
         _client = client;
         _updateSub = client.updates?.listen((messages) {
@@ -232,22 +168,31 @@ class MqttRemoteService {
 
   bool get isConnected => _clientAdapter.isConnected;
   String get slug => _slug;
+  String get statusTopic => 'absorb/$_slug/status';
+  String get commandTopic => 'absorb/$_slug/set';
+  String get stateTopic => 'absorb/$_slug/state';
+
+  static String sanitizeSlug(String rawSlug) {
+    final sanitized = rawSlug.trim().replaceAll(RegExp(r'[^a-zA-Z0-9_-]'), '_');
+    return sanitized.isEmpty ? 'absorb' : sanitized.toLowerCase();
+  }
 
   Future<bool> connect({
     required String host,
-    int port = 1883,
+    int? port,
     required String slug,
     String? username,
     String? password,
     bool useTls = false,
   }) async {
-    _slug = slug.trim().isEmpty ? 'absorb' : slug.trim();
-    final clientIdentifier = 'absorb_${_slug}_${DateTime.now().millisecondsSinceEpoch % 100000}';
-    final statusTopic = 'absorb/$_slug/status';
+    _slug = sanitizeSlug(slug);
+    final resolvedPort = port ?? (useTls ? 8883 : 1883);
+    final clientIdentifier =
+        'absorb_${_slug}_${DateTime.now().millisecondsSinceEpoch % 100000}';
 
-    final success = await _clientAdapter.connect(
+    final config = MqttConnectionConfig(
       host: host,
-      port: port,
+      port: resolvedPort,
       identifier: clientIdentifier,
       willTopic: statusTopic,
       willMessage: 'offline',
@@ -258,6 +203,7 @@ class MqttRemoteService {
       useTls: useTls,
     );
 
+    final success = await _clientAdapter.connect(config);
     if (!success) {
       return false;
     }
@@ -266,7 +212,6 @@ class MqttRemoteService {
     _clientAdapter.publish(statusTopic, 'online', retain: true);
 
     // Subscribe to command topic
-    final commandTopic = 'absorb/$_slug/set';
     _clientAdapter.subscribe(commandTopic);
 
     // Listen to inbound commands
@@ -288,12 +233,11 @@ class MqttRemoteService {
   }
 
   void _handleInboundMessage(String topic, String payload) {
-    final commandTopic = 'absorb/$_slug/set';
     if (topic != commandTopic) return;
 
     final command = payload.trim().toUpperCase();
     if (command == 'PLAY') {
-      _audioPlayerService.play(fromUi: true);
+      _audioPlayerService.play(fromUi: false);
     } else if (command == 'PAUSE') {
       _audioPlayerService.pause();
     }
@@ -306,7 +250,7 @@ class MqttRemoteService {
     if (currentState != _lastReportedPlaybackState) {
       _lastReportedPlaybackState = currentState;
       _clientAdapter.publish(
-        'absorb/$_slug/state',
+        stateTopic,
         currentState,
         retain: false,
       );
@@ -315,7 +259,7 @@ class MqttRemoteService {
 
   void disconnect() {
     if (_clientAdapter.isConnected) {
-      _clientAdapter.publish('absorb/$_slug/status', 'offline', retain: true);
+      _clientAdapter.publish(statusTopic, 'offline', retain: true);
     }
     _incomingSub?.cancel();
     _incomingSub = null;
