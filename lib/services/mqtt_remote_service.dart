@@ -194,6 +194,9 @@ enum MqttConnectionStatus {
 class MqttRemoteService extends ChangeNotifier {
   static const double minSpeed = 0.5;
   static const double maxSpeed = 3.0;
+  static const int minSleepDurationMinutes = 0;
+  static const int maxSleepDurationMinutes = 120;
+  static const int stepSleepDurationMinutes = 5;
 
   static final MqttRemoteService _instance = MqttRemoteService._();
   factory MqttRemoteService() => _instance;
@@ -345,6 +348,8 @@ class MqttRemoteService extends ChangeNotifier {
   String get speedTopic => 'absorb/$_slug/speed/set';
   String get sleepTimerTopic => 'absorb/$_slug/sleep_timer';
   String get sleepTimerSetTopic => 'absorb/$_slug/sleep_timer/set';
+  String get sleepTimerDurationSetTopic =>
+      'absorb/$_slug/sleep_timer/duration/set';
   String get playMediaTopic => 'absorb/$_slug/play_media/set';
   String get discoveryMediaPlayerTopic =>
       'homeassistant/media_player/absorb_$_slug/config';
@@ -352,6 +357,8 @@ class MqttRemoteService extends ChangeNotifier {
       'homeassistant/sensor/absorb_${_slug}_sleep_timer/config';
   String get discoverySleepChapterButtonTopic =>
       'homeassistant/button/absorb_${_slug}_sleep_chapter/config';
+  String get discoverySleepTimerNumberTopic =>
+      'homeassistant/number/absorb_${_slug}_sleep_timer/config';
 
   static String sanitizeSlug(String rawSlug) {
     final sanitized = rawSlug.trim().replaceAll(RegExp(r'[^a-zA-Z0-9_-]'), '_');
@@ -522,6 +529,7 @@ class MqttRemoteService extends ChangeNotifier {
       _clientAdapter.subscribe(volumeTopic);
       _clientAdapter.subscribe(speedTopic);
       _clientAdapter.subscribe(sleepTimerSetTopic);
+      _clientAdapter.subscribe(sleepTimerDurationSetTopic);
       _clientAdapter.subscribe(playMediaTopic);
 
       // Listen to inbound commands
@@ -642,6 +650,31 @@ class MqttRemoteService extends ChangeNotifier {
     };
   }
 
+  Map<String, dynamic> buildSleepTimerNumberDiscoveryPayload() {
+    return {
+      'name': 'Absorb ($_slug) Sleep Timer Duration',
+      'unique_id': 'absorb_${_slug}_sleep_timer',
+      'command_topic': sleepTimerDurationSetTopic,
+      'min': minSleepDurationMinutes,
+      'max': maxSleepDurationMinutes,
+      'step': stepSleepDurationMinutes,
+      'unit': 'min',
+      'unit_of_measurement': 'min',
+      'icon': 'mdi:timer-outline',
+      'availability_topic': statusTopic,
+      'payload_available': 'online',
+      'payload_not_available': 'offline',
+      'device': buildDeviceMetadata(),
+    };
+  }
+
+  List<String> get allDiscoveryTopics => [
+        discoveryMediaPlayerTopic,
+        discoverySleepTimerSensorTopic,
+        discoverySleepChapterButtonTopic,
+        discoverySleepTimerNumberTopic,
+      ];
+
   void publishDiscovery() {
     _clientAdapter.publish(
       discoveryMediaPlayerTopic,
@@ -658,6 +691,17 @@ class MqttRemoteService extends ChangeNotifier {
       jsonEncode(buildSleepChapterButtonDiscoveryPayload()),
       retain: true,
     );
+    _clientAdapter.publish(
+      discoverySleepTimerNumberTopic,
+      jsonEncode(buildSleepTimerNumberDiscoveryPayload()),
+      retain: true,
+    );
+  }
+
+  void unpublishDiscovery() {
+    for (final topic in allDiscoveryTopics) {
+      _clientAdapter.publish(topic, '', retain: true);
+    }
   }
 
   Future<void> _handleInboundMessage(String topic, String payload) async {
@@ -714,6 +758,8 @@ class MqttRemoteService extends ChangeNotifier {
       }
     } else if (topic == sleepTimerSetTopic) {
       _handleSleepTimerCommand(payload);
+    } else if (topic == sleepTimerDurationSetTopic) {
+      _handleSleepTimerDurationCommand(payload);
     } else if (topic == playMediaTopic) {
       await _handlePlayMediaCommand(payload);
     }
@@ -914,6 +960,22 @@ class MqttRemoteService extends ChangeNotifier {
     if (minutes != null && minutes > 0) {
       _sleepTimerService.setTimeSleep(Duration(minutes: minutes));
       return;
+    }
+  }
+
+  void _handleSleepTimerDurationCommand(String rawPayload) {
+    final trimmed = rawPayload.trim();
+    if (trimmed.isEmpty) return;
+    final val = num.tryParse(trimmed);
+    if (val != null && val.isFinite) {
+      final minutes = val.round();
+      if (minutes == 0) {
+        _sleepTimerService.cancel();
+      } else if (minutes > 0) {
+        _sleepTimerService.setTimeSleep(
+          Duration(minutes: minutes.clamp(1, maxSleepDurationMinutes)),
+        );
+      }
     }
   }
 
