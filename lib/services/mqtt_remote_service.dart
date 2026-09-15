@@ -197,6 +197,14 @@ class MqttRemoteService extends ChangeNotifier {
   static const int minSleepDurationMinutes = 0;
   static const int maxSleepDurationMinutes = 120;
   static const int stepSleepDurationMinutes = 5;
+  static const List<String> sleepTimerPresets = [
+    'off',
+    '15m',
+    '30m',
+    '45m',
+    '60m',
+    'end_of_chapter',
+  ];
 
   static final MqttRemoteService _instance = MqttRemoteService._();
   factory MqttRemoteService() => _instance;
@@ -350,6 +358,8 @@ class MqttRemoteService extends ChangeNotifier {
   String get sleepTimerSetTopic => 'absorb/$_slug/sleep_timer/set';
   String get sleepTimerDurationSetTopic =>
       'absorb/$_slug/sleep_timer/duration/set';
+  String get sleepTimerPresetSetTopic =>
+      'absorb/$_slug/sleep_timer_preset/set';
   String get playMediaTopic => 'absorb/$_slug/play_media/set';
   String get discoveryMediaPlayerTopic =>
       'homeassistant/media_player/absorb_$_slug/config';
@@ -359,6 +369,8 @@ class MqttRemoteService extends ChangeNotifier {
       'homeassistant/button/absorb_${_slug}_sleep_chapter/config';
   String get discoverySleepTimerNumberTopic =>
       'homeassistant/number/absorb_${_slug}_sleep_timer/config';
+  String get discoverySleepTimerPresetSelectTopic =>
+      'homeassistant/select/absorb_${_slug}_sleep_timer_preset/config';
 
   static String sanitizeSlug(String rawSlug) {
     final sanitized = rawSlug.trim().replaceAll(RegExp(r'[^a-zA-Z0-9_-]'), '_');
@@ -530,6 +542,7 @@ class MqttRemoteService extends ChangeNotifier {
       _clientAdapter.subscribe(speedTopic);
       _clientAdapter.subscribe(sleepTimerSetTopic);
       _clientAdapter.subscribe(sleepTimerDurationSetTopic);
+      _clientAdapter.subscribe(sleepTimerPresetSetTopic);
       _clientAdapter.subscribe(playMediaTopic);
 
       // Listen to inbound commands
@@ -668,11 +681,26 @@ class MqttRemoteService extends ChangeNotifier {
     };
   }
 
+  Map<String, dynamic> buildSleepTimerPresetSelectDiscoveryPayload() {
+    return {
+      'name': 'Absorb ($_slug) Sleep Timer Preset',
+      'unique_id': 'absorb_${_slug}_sleep_timer_preset',
+      'command_topic': sleepTimerPresetSetTopic,
+      'options': sleepTimerPresets,
+      'icon': 'mdi:timer-cog-outline',
+      'availability_topic': statusTopic,
+      'payload_available': 'online',
+      'payload_not_available': 'offline',
+      'device': buildDeviceMetadata(),
+    };
+  }
+
   List<String> get allDiscoveryTopics => [
         discoveryMediaPlayerTopic,
         discoverySleepTimerSensorTopic,
         discoverySleepChapterButtonTopic,
         discoverySleepTimerNumberTopic,
+        discoverySleepTimerPresetSelectTopic,
       ];
 
   void publishDiscovery() {
@@ -694,6 +722,11 @@ class MqttRemoteService extends ChangeNotifier {
     _clientAdapter.publish(
       discoverySleepTimerNumberTopic,
       jsonEncode(buildSleepTimerNumberDiscoveryPayload()),
+      retain: true,
+    );
+    _clientAdapter.publish(
+      discoverySleepTimerPresetSelectTopic,
+      jsonEncode(buildSleepTimerPresetSelectDiscoveryPayload()),
       retain: true,
     );
   }
@@ -760,6 +793,8 @@ class MqttRemoteService extends ChangeNotifier {
       _handleSleepTimerCommand(payload);
     } else if (topic == sleepTimerDurationSetTopic) {
       _handleSleepTimerDurationCommand(payload);
+    } else if (topic == sleepTimerPresetSetTopic) {
+      _handleSleepTimerPresetCommand(payload);
     } else if (topic == playMediaTopic) {
       await _handlePlayMediaCommand(payload);
     }
@@ -976,6 +1011,24 @@ class MqttRemoteService extends ChangeNotifier {
           Duration(minutes: minutes.clamp(1, maxSleepDurationMinutes)),
         );
       }
+    }
+  }
+
+  void _handleSleepTimerPresetCommand(String rawPayload) {
+    final preset = rawPayload.trim().toLowerCase();
+    switch (preset) {
+      case 'off':
+        _sleepTimerService.cancel();
+      case '15m':
+        _sleepTimerService.setTimeSleep(const Duration(minutes: 15));
+      case '30m':
+        _sleepTimerService.setTimeSleep(const Duration(minutes: 30));
+      case '45m':
+        _sleepTimerService.setTimeSleep(const Duration(minutes: 45));
+      case '60m':
+        _sleepTimerService.setTimeSleep(const Duration(minutes: 60));
+      case 'end_of_chapter':
+        _sleepTimerService.setChapterSleep(1);
     }
   }
 
