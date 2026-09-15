@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+set -eo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+HOST="localhost"
+PORT=1883
+START_LOCAL_BROKER=false
+
+for arg in "$@"; do
+  if [ "$arg" == "--start-broker" ]; then
+    START_LOCAL_BROKER=true
+  fi
+done
+
+# Check if port 1883 is already open
+if ! lsof -iTCP:$PORT -sTCP:LISTEN >/dev/null 2>&1; then
+  echo "No MQTT broker detected on port $PORT."
+  echo "Starting local Mosquitto test broker bound to 0.0.0.0:$PORT..."
+  
+  CONF_DIR="/tmp/absorb_mosquitto_test"
+  mkdir -p "$CONF_DIR"
+  cat <<EOF > "$CONF_DIR/mosquitto.conf"
+listener $PORT 0.0.0.0
+allow_anonymous true
+log_type error
+log_type warning
+log_type notice
+log_type information
+EOF
+
+  mosquitto -c "$CONF_DIR/mosquitto.conf" -d
+  sleep 1
+  echo "✓ Mosquitto test broker started."
+fi
+
+echo ""
+echo "============================================================"
+echo " Absorb MQTT Test Environment"
+echo "============================================================"
+echo " Emulator Target Host: 10.0.2.2"
+echo " Host Machine Port:    $PORT"
+echo " Default Topic Slug:   absorb"
+echo "============================================================"
+echo ""
+
+cd "$ROOT_DIR"
+dart run tool/mqtt_harness.dart "$@"
