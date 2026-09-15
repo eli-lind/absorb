@@ -2397,6 +2397,18 @@ void main() {
       );
       fakeMqttClient.simulateInboundMessage(
         'absorb/kids_tablet/speed/select/set',
+        '0.5x',
+      );
+      fakeMqttClient.simulateInboundMessage(
+        'absorb/kids_tablet/speed/select/set',
+        '3.0x',
+      );
+      fakeMqttClient.simulateInboundMessage(
+        'absorb/kids_tablet/speed/select/set',
+        '1.5',
+      );
+      fakeMqttClient.simulateInboundMessage(
+        'absorb/kids_tablet/speed/select/set',
         '',
       );
       await Future<void>.delayed(Duration.zero);

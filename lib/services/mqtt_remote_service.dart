@@ -205,6 +205,13 @@ class MqttRemoteService extends ChangeNotifier {
     '60m',
     'end_of_chapter',
   ];
+  static const Map<String, double> speedOptionValues = {
+    '0.75x': 0.75,
+    '1.0x': 1.0,
+    '1.25x': 1.25,
+    '1.5x': 1.5,
+    '2.0x': 2.0,
+  };
   static const List<String> speedOptions = [
     '0.75x',
     '1.0x',
@@ -816,9 +823,7 @@ class MqttRemoteService extends ChangeNotifier {
     } else if (topic == speedTopic) {
       final speed = num.tryParse(payload.trim())?.toDouble();
       if (speed != null) {
-        final clampedSpeed = speed.clamp(minSpeed, maxSpeed);
-        await _audioPlayerService.setSpeed(clampedSpeed);
-        _publishState();
+        await _applySpeed(speed);
       }
     } else if (topic == sleepTimerSetTopic) {
       _handleSleepTimerCommand(payload);
@@ -1065,13 +1070,17 @@ class MqttRemoteService extends ChangeNotifier {
     }
   }
 
+  Future<void> _applySpeed(double speed) async {
+    final clampedSpeed = speed.clamp(minSpeed, maxSpeed);
+    await _audioPlayerService.setSpeed(clampedSpeed);
+    _publishState();
+  }
+
   Future<void> _handleSpeedSelectCommand(String rawPayload) async {
-    final trimmed = rawPayload.trim().toLowerCase();
-    final parsed = double.tryParse(trimmed.replaceAll('x', ''));
-    if (parsed != null) {
-      final clamped = parsed.clamp(minSpeed, maxSpeed);
-      await _audioPlayerService.setSpeed(clamped);
-      _publishState();
+    final option = rawPayload.trim().toLowerCase();
+    final rate = speedOptionValues[option];
+    if (rate != null) {
+      await _applySpeed(rate);
     }
   }
 
