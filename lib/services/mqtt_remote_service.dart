@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:mqtt_client/mqtt_client.dart';
 import 'package:mqtt_client/mqtt_server_client.dart';
 import 'audio_player_service.dart';
+import 'sleep_timer_service.dart';
 
 
 class PublishedMqttMessage {
@@ -158,22 +159,27 @@ class MqttRemoteService {
   factory MqttRemoteService() => _instance;
   MqttRemoteService._()
       : _audioPlayerService = AudioPlayerService(),
+        _sleepTimerService = SleepTimerService(),
         _clientAdapter = DefaultMqttClientAdapter();
 
   @visibleForTesting
   MqttRemoteService.forTesting({
     required AudioPlayerService audioPlayerService,
+    SleepTimerService? sleepTimerService,
     required MqttClientAdapter clientAdapter,
   })  : _audioPlayerService = audioPlayerService,
+        _sleepTimerService = sleepTimerService ?? SleepTimerService(),
         _clientAdapter = clientAdapter;
 
   final AudioPlayerService _audioPlayerService;
+  final SleepTimerService _sleepTimerService;
   final MqttClientAdapter _clientAdapter;
 
   String _slug = 'absorb';
   StreamSubscription? _incomingSub;
   Timer? _heartbeatTimer;
   bool _isPlayerListenerAttached = false;
+  bool _isSleepTimerListenerAttached = false;
   _PlayerSnapshot? _lastSnapshot;
 
   bool get isConnected => _clientAdapter.isConnected;
@@ -183,6 +189,8 @@ class MqttRemoteService {
   String get stateTopic => 'absorb/$_slug/state';
   String get seekTopic => 'absorb/$_slug/seek/set';
   String get volumeTopic => 'absorb/$_slug/volume/set';
+  String get sleepTimerTopic => 'absorb/$_slug/sleep_timer';
+  String get sleepTimerSetTopic => 'absorb/$_slug/sleep_timer/set';
 
   static String sanitizeSlug(String rawSlug) {
     final sanitized = rawSlug.trim().replaceAll(RegExp(r'[^a-zA-Z0-9_-]'), '_');
@@ -227,6 +235,7 @@ class MqttRemoteService {
     _clientAdapter.subscribe(commandTopic);
     _clientAdapter.subscribe(seekTopic);
     _clientAdapter.subscribe(volumeTopic);
+    _clientAdapter.subscribe(sleepTimerSetTopic);
 
     // Listen to inbound commands
     await _incomingSub?.cancel();
@@ -240,8 +249,15 @@ class MqttRemoteService {
       _isPlayerListenerAttached = true;
     }
 
+    // Attach listener for sleep timer state changes
+    if (!_isSleepTimerListenerAttached) {
+      _sleepTimerService.addListener(onSleepTimerChanged);
+      _isSleepTimerListenerAttached = true;
+    }
+
     // Initial state publish
     onPlayerStateChanged(force: true);
+    onSleepTimerChanged();
 
     return true;
   }
@@ -278,7 +294,67 @@ class MqttRemoteService {
         await _audioPlayerService.setVolume(targetVol);
         _publishState();
       }
+    } else if (topic == sleepTimerSetTopic) {
+      _handleSleepTimerCommand(payload);
     }
+  }
+
+  void _handleSleepTimerCommand(String rawPayload) {
+    final trimmed = rawPayload.trim();
+    if (trimmed.isEmpty) return;
+
+    try {
+      final decoded = jsonDecode(trimmed);
+      if (decoded is Map<String, dynamic>) {
+        if (decoded['cancel'] == true || decoded['mode'] == 'off') {
+          _sleepTimerService.cancel();
+          return;
+        }
+        if (decoded['mode'] == 'end_of_chapter') {
+          _sleepTimerService.setChapterSleep(1);
+          return;
+        }
+        final durationMinutes =
+            decoded['duration_minutes'] ?? decoded['minutes'] ?? decoded['duration'];
+        if (durationMinutes is num && durationMinutes > 0) {
+          _sleepTimerService.setTimeSleep(Duration(minutes: durationMinutes.toInt()));
+          return;
+        }
+      }
+    } catch (_) {
+      // Fall through to non-JSON string handling below
+    }
+
+    // Fallback for simple string payloads
+    final upper = trimmed.toUpperCase();
+    if (upper == 'CANCEL' || upper == 'OFF') {
+      _sleepTimerService.cancel();
+    } else if (trimmed.toLowerCase() == 'end_of_chapter') {
+      _sleepTimerService.setChapterSleep(1);
+    } else {
+      final minutes = int.tryParse(trimmed);
+      if (minutes != null && minutes > 0) {
+        _sleepTimerService.setTimeSleep(Duration(minutes: minutes));
+      }
+    }
+  }
+
+  Map<String, dynamic> buildSleepTimerPayload() {
+    return {
+      'active': _sleepTimerService.isActive,
+      'mode': _sleepTimerService.mode.name,
+      'remaining_seconds': _sleepTimerService.timeRemaining.inSeconds,
+      'initial_minutes': _sleepTimerService.initialDuration.inMinutes,
+    };
+  }
+
+  void onSleepTimerChanged() {
+    _publishSleepTimer();
+  }
+
+  void _publishSleepTimer() {
+    final payload = jsonEncode(buildSleepTimerPayload());
+    _clientAdapter.publish(sleepTimerTopic, payload, retain: true);
   }
 
   Map<String, dynamic> buildStatePayload() {
@@ -380,6 +456,10 @@ class MqttRemoteService {
     if (_isPlayerListenerAttached) {
       _audioPlayerService.removeListener(onPlayerStateChanged);
       _isPlayerListenerAttached = false;
+    }
+    if (_isSleepTimerListenerAttached) {
+      _sleepTimerService.removeListener(onSleepTimerChanged);
+      _isSleepTimerListenerAttached = false;
     }
     _clientAdapter.disconnect();
     _lastSnapshot = null;

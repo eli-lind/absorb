@@ -1,15 +1,19 @@
 import 'dart:async';
 import 'dart:convert';
 import 'package:fake_async/fake_async.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mocktail/mocktail.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:absorb/services/mqtt_remote_service.dart';
 import 'package:absorb/services/audio_player_service.dart';
+import 'package:absorb/services/sleep_timer_service.dart';
 
 
 
 class MockAudioPlayerService extends Mock implements AudioPlayerService {}
+
+class MockSleepTimerService extends Mock implements SleepTimerService {}
 
 class FakeMqttClientAdapter implements MqttClientAdapter {
   MqttConnectionConfig? lastConfig;
@@ -370,4 +374,150 @@ void main() {
     });
   });
 
+  group('MqttRemoteService Ticket #4: Dual-Mode Sleep Timer Control and Telemetry', () {
+    late MockAudioPlayerService mockAudioPlayerService;
+    late MockSleepTimerService mockSleepTimerService;
+    late FakeMqttClientAdapter fakeMqttClient;
+    late MqttRemoteService service;
+    late List<VoidCallback> sleepTimerListeners;
+
+    setUp(() {
+      SharedPreferences.setMockInitialValues({});
+      mockAudioPlayerService = MockAudioPlayerService();
+      mockSleepTimerService = MockSleepTimerService();
+      fakeMqttClient = FakeMqttClientAdapter();
+      sleepTimerListeners = [];
+
+      when(() => mockAudioPlayerService.isPlaying).thenReturn(false);
+      when(() => mockAudioPlayerService.nowPlayingTitle).thenReturn('');
+      when(() => mockAudioPlayerService.currentTitle).thenReturn('');
+      when(() => mockAudioPlayerService.currentAuthor).thenReturn('');
+      when(() => mockAudioPlayerService.currentCoverUrl).thenReturn(null);
+      when(() => mockAudioPlayerService.totalDuration).thenReturn(0.0);
+      when(() => mockAudioPlayerService.position).thenReturn(Duration.zero);
+      when(() => mockAudioPlayerService.volume).thenReturn(1.0);
+      when(() => mockAudioPlayerService.speed).thenReturn(1.0);
+      when(() => mockAudioPlayerService.chapters).thenReturn([]);
+      when(() => mockAudioPlayerService.currentChapter).thenReturn(null);
+
+      when(() => mockSleepTimerService.isActive).thenReturn(false);
+      when(() => mockSleepTimerService.mode).thenReturn(SleepTimerMode.off);
+      when(() => mockSleepTimerService.timeRemaining).thenReturn(Duration.zero);
+      when(() => mockSleepTimerService.initialDuration).thenReturn(Duration.zero);
+      when(() => mockSleepTimerService.addListener(any())).thenAnswer((invocation) {
+        final listener = invocation.positionalArguments[0] as VoidCallback;
+        sleepTimerListeners.add(listener);
+      });
+      when(() => mockSleepTimerService.removeListener(any())).thenAnswer((invocation) {
+        final listener = invocation.positionalArguments[0] as VoidCallback;
+        sleepTimerListeners.remove(listener);
+      });
+      when(() => mockSleepTimerService.setTimeSleep(any())).thenReturn(null);
+      when(() => mockSleepTimerService.setChapterSleep(any())).thenReturn(null);
+      when(() => mockSleepTimerService.cancel()).thenReturn(null);
+
+      service = MqttRemoteService.forTesting(
+        audioPlayerService: mockAudioPlayerService,
+        sleepTimerService: mockSleepTimerService,
+        clientAdapter: fakeMqttClient,
+      );
+    });
+
+    tearDown(() {
+      service.dispose();
+      fakeMqttClient.dispose();
+    });
+
+    test('subscribes to absorb/<slug>/sleep_timer/set and publishes initial retained sleep timer state on connect', () async {
+      await service.connect(
+        host: '192.168.1.50',
+        slug: 'kids_tablet',
+      );
+
+      expect(fakeMqttClient.subscriptions, contains('absorb/kids_tablet/sleep_timer/set'));
+
+      final sleepMsg = fakeMqttClient.publishedMessages.firstWhere(
+        (m) => m.topic == 'absorb/kids_tablet/sleep_timer',
+      );
+      expect(sleepMsg.retain, isTrue);
+
+      final payload = jsonDecode(sleepMsg.payload) as Map<String, dynamic>;
+      expect(payload['active'], isFalse);
+      expect(payload['mode'], equals('off'));
+      expect(payload['remaining_seconds'], equals(0));
+      expect(payload['initial_minutes'], equals(0));
+    });
+
+    test('publishes updated retained state when SleepTimerService changes', () async {
+      await service.connect(
+        host: '192.168.1.50',
+        slug: 'kids_tablet',
+      );
+
+      when(() => mockSleepTimerService.isActive).thenReturn(true);
+      when(() => mockSleepTimerService.mode).thenReturn(SleepTimerMode.time);
+      when(() => mockSleepTimerService.timeRemaining).thenReturn(const Duration(minutes: 19, seconds: 45));
+      when(() => mockSleepTimerService.initialDuration).thenReturn(const Duration(minutes: 20));
+
+      for (final listener in sleepTimerListeners) {
+        listener();
+      }
+
+      final sleepMsg = fakeMqttClient.publishedMessages.lastWhere(
+        (m) => m.topic == 'absorb/kids_tablet/sleep_timer',
+      );
+      expect(sleepMsg.retain, isTrue);
+
+      final payload = jsonDecode(sleepMsg.payload) as Map<String, dynamic>;
+      expect(payload['active'], isTrue);
+      expect(payload['mode'], equals('time'));
+      expect(payload['remaining_seconds'], equals(1185));
+      expect(payload['initial_minutes'], equals(20));
+    });
+
+    test('parses duration minute requests on absorb/<slug>/sleep_timer/set and delegates to setTimeSleep', () async {
+      await service.connect(
+        host: '192.168.1.50',
+        slug: 'kids_tablet',
+      );
+
+      fakeMqttClient.simulateInboundMessage(
+        'absorb/kids_tablet/sleep_timer/set',
+        jsonEncode({'duration_minutes': 25}),
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      verify(() => mockSleepTimerService.setTimeSleep(const Duration(minutes: 25))).called(1);
+    });
+
+    test('parses end_of_chapter mode request on absorb/<slug>/sleep_timer/set and delegates to setChapterSleep(1)', () async {
+      await service.connect(
+        host: '192.168.1.50',
+        slug: 'kids_tablet',
+      );
+
+      fakeMqttClient.simulateInboundMessage(
+        'absorb/kids_tablet/sleep_timer/set',
+        jsonEncode({'mode': 'end_of_chapter'}),
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      verify(() => mockSleepTimerService.setChapterSleep(1)).called(1);
+    });
+
+    test('parses cancel request on absorb/<slug>/sleep_timer/set and delegates to cancel()', () async {
+      await service.connect(
+        host: '192.168.1.50',
+        slug: 'kids_tablet',
+      );
+
+      fakeMqttClient.simulateInboundMessage(
+        'absorb/kids_tablet/sleep_timer/set',
+        jsonEncode({'cancel': true}),
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      verify(() => mockSleepTimerService.cancel()).called(1);
+    });
+  });
 }
