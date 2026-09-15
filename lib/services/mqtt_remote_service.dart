@@ -163,14 +163,21 @@ class MqttRemoteService {
 
   String _slug = 'absorb';
   StreamSubscription? _incomingSub;
-  String? _lastReportedPlaybackState;
+  Timer? _heartbeatTimer;
   bool _isPlayerListenerAttached = false;
+
+  bool? _lastIsPlaying;
+  String? _lastBook;
+  String? _lastChapterTitle;
+  double? _lastSpeed;
 
   bool get isConnected => _clientAdapter.isConnected;
   String get slug => _slug;
   String get statusTopic => 'absorb/$_slug/status';
   String get commandTopic => 'absorb/$_slug/set';
   String get stateTopic => 'absorb/$_slug/state';
+  String get seekTopic => 'absorb/$_slug/seek/set';
+  String get volumeTopic => 'absorb/$_slug/volume/set';
 
   static String sanitizeSlug(String rawSlug) {
     final sanitized = rawSlug.trim().replaceAll(RegExp(r'[^a-zA-Z0-9_-]'), '_');
@@ -211,8 +218,10 @@ class MqttRemoteService {
     // Publish online status retained
     _clientAdapter.publish(statusTopic, 'online', retain: true);
 
-    // Subscribe to command topic
+    // Subscribe to command and control topics
     _clientAdapter.subscribe(commandTopic);
+    _clientAdapter.subscribe(seekTopic);
+    _clientAdapter.subscribe(volumeTopic);
 
     // Listen to inbound commands
     await _incomingSub?.cancel();
@@ -227,40 +236,127 @@ class MqttRemoteService {
     }
 
     // Initial state publish
-    onPlayerStateChanged();
+    onPlayerStateChanged(force: true);
 
     return true;
   }
 
   void _handleInboundMessage(String topic, String payload) {
-    if (topic != commandTopic) return;
-
-    final command = payload.trim().toUpperCase();
-    if (command == 'PLAY') {
-      _audioPlayerService.play(fromUi: false);
-    } else if (command == 'PAUSE') {
-      _audioPlayerService.pause();
+    if (topic == commandTopic) {
+      final command = payload.trim().toUpperCase();
+      if (command == 'PLAY') {
+        _audioPlayerService.play(fromUi: false);
+      } else if (command == 'PAUSE') {
+        _audioPlayerService.pause();
+      } else if (command == 'SKIP_FORWARD') {
+        _audioPlayerService.skipForward();
+      } else if (command == 'SKIP_BACKWARD') {
+        _audioPlayerService.skipBackward();
+      }
+    } else if (topic == seekTopic) {
+      final seconds = num.tryParse(payload.trim())?.toDouble();
+      if (seconds != null && seconds >= 0) {
+        _audioPlayerService.seekTo(
+          Duration(milliseconds: (seconds * 1000).round()),
+        );
+        _publishState();
+      }
+    } else if (topic == volumeTopic) {
+      final val = num.tryParse(payload.trim())?.toDouble();
+      if (val != null) {
+        final targetVol =
+            val > 1.0 ? (val / 100.0).clamp(0.0, 1.0) : val.clamp(0.0, 1.0);
+        _audioPlayerService.setVolume(targetVol);
+        _publishState();
+      }
     }
   }
 
-  void onPlayerStateChanged() {
+  Map<String, dynamic> buildStatePayload() {
     final isPlaying = _audioPlayerService.isPlaying;
     final currentState = isPlaying ? 'playing' : 'paused';
-
-    if (currentState != _lastReportedPlaybackState) {
-      _lastReportedPlaybackState = currentState;
-      _clientAdapter.publish(
-        stateTopic,
-        currentState,
-        retain: false,
+    final currentChapter = _audioPlayerService.currentChapter;
+    final chapterTitle = currentChapter?['title'] as String?;
+    final chapters = _audioPlayerService.chapters;
+    int? chapterIndex;
+    if (currentChapter != null) {
+      final idx = chapters.indexWhere(
+        (ch) =>
+            identical(ch, currentChapter) ||
+            (ch is Map &&
+                ((ch['id'] != null && ch['id'] == currentChapter['id']) ||
+                    (ch['title'] == currentChapter['title'] &&
+                        ch['start'] == currentChapter['start']))),
       );
+      if (idx >= 0) chapterIndex = idx;
     }
+
+    return {
+      'state': currentState,
+      'title': _audioPlayerService.nowPlayingTitle,
+      'author': _audioPlayerService.currentAuthor,
+      'book': _audioPlayerService.currentTitle,
+      'chapter_title': chapterTitle,
+      'chapter_index': chapterIndex,
+      'duration_seconds': _audioPlayerService.totalDuration,
+      'position_seconds': _audioPlayerService.position.inMilliseconds / 1000.0,
+      'volume': _audioPlayerService.volume,
+      'speed': _audioPlayerService.speed,
+      'cover_url': _audioPlayerService.currentCoverUrl,
+    };
+
+  }
+
+  void _publishState() {
+    final payload = jsonEncode(buildStatePayload());
+    _clientAdapter.publish(stateTopic, payload, retain: false);
+  }
+
+  void onPlayerStateChanged({bool force = false}) {
+    final isPlaying = _audioPlayerService.isPlaying;
+    final book = _audioPlayerService.currentTitle;
+    final chapter = _audioPlayerService.currentChapter?['title'] as String?;
+    final speed = _audioPlayerService.speed;
+
+    final hasStateTransition = force ||
+        _lastIsPlaying != isPlaying ||
+        _lastBook != book ||
+        _lastChapterTitle != chapter ||
+        _lastSpeed != speed;
+
+    if (hasStateTransition) {
+      _lastIsPlaying = isPlaying;
+      _lastBook = book;
+      _lastChapterTitle = chapter;
+      _lastSpeed = speed;
+
+      _publishState();
+
+      if (isPlaying) {
+        _startHeartbeat();
+      } else {
+        _stopHeartbeat();
+      }
+    }
+  }
+
+  void _startHeartbeat() {
+    _heartbeatTimer?.cancel();
+    _heartbeatTimer = Timer.periodic(const Duration(seconds: 10), (_) {
+      _publishState();
+    });
+  }
+
+  void _stopHeartbeat() {
+    _heartbeatTimer?.cancel();
+    _heartbeatTimer = null;
   }
 
   void disconnect() {
     if (_clientAdapter.isConnected) {
       _clientAdapter.publish(statusTopic, 'offline', retain: true);
     }
+    _stopHeartbeat();
     _incomingSub?.cancel();
     _incomingSub = null;
     if (_isPlayerListenerAttached) {
@@ -268,7 +364,10 @@ class MqttRemoteService {
       _isPlayerListenerAttached = false;
     }
     _clientAdapter.disconnect();
-    _lastReportedPlaybackState = null;
+    _lastIsPlaying = null;
+    _lastBook = null;
+    _lastChapterTitle = null;
+    _lastSpeed = null;
   }
 
   void dispose() {
