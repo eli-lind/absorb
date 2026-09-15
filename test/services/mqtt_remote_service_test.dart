@@ -1530,4 +1530,160 @@ void main() {
       expect(service.connectionStatus, equals(MqttConnectionStatus.disconnected));
     });
   });
+
+  group('MqttRemoteService Ticket #20: Transport Gap Closure & Playback Speed', () {
+    late MockAudioPlayerService mockAudioPlayerService;
+    late FakeMqttClientAdapter fakeMqttClient;
+    late MqttRemoteService service;
+
+    setUp(() async {
+      SharedPreferences.setMockInitialValues({
+        'mqtt_enabled': true,
+        'mqtt_host': '192.168.1.50',
+        'mqtt_port': 1883,
+        'mqtt_slug': 'kids_tablet',
+      });
+      await SharedPreferences.getInstance();
+      mockAudioPlayerService = MockAudioPlayerService();
+      fakeMqttClient = FakeMqttClientAdapter();
+
+      when(() => mockAudioPlayerService.isPlaying).thenReturn(false);
+      when(() => mockAudioPlayerService.nowPlayingTitle).thenReturn('');
+      when(() => mockAudioPlayerService.currentTitle).thenReturn('');
+      when(() => mockAudioPlayerService.currentAuthor).thenReturn('');
+      when(() => mockAudioPlayerService.currentCoverUrl).thenReturn(null);
+      when(() => mockAudioPlayerService.totalDuration).thenReturn(0.0);
+      when(() => mockAudioPlayerService.position).thenReturn(Duration.zero);
+      when(() => mockAudioPlayerService.volume).thenReturn(1.0);
+      when(() => mockAudioPlayerService.speed).thenReturn(1.0);
+      when(() => mockAudioPlayerService.chapters).thenReturn([]);
+      when(() => mockAudioPlayerService.currentChapter).thenReturn(null);
+      when(() => mockAudioPlayerService.play(fromUi: any(named: 'fromUi'))).thenAnswer((_) async {});
+      when(() => mockAudioPlayerService.pause()).thenAnswer((_) async {});
+      when(() => mockAudioPlayerService.setSpeed(any())).thenAnswer((_) async {});
+
+      service = MqttRemoteService.forTesting(
+        audioPlayerService: mockAudioPlayerService,
+        clientAdapter: fakeMqttClient,
+        enableJitter: false,
+      );
+    });
+
+    tearDown(() {
+      service.dispose();
+      fakeMqttClient.dispose();
+    });
+
+    test('subscribes to absorb/<slug>/speed/set upon connection', () async {
+      await service.connect(
+        host: '192.168.1.50',
+        slug: 'kids_tablet',
+      );
+
+      expect(fakeMqttClient.subscriptions, contains('absorb/kids_tablet/speed/set'));
+    });
+
+    test('inbound numeric payload on speed topic updates AudioPlayerService.setSpeed()', () async {
+      await service.connect(
+        host: '192.168.1.50',
+        slug: 'kids_tablet',
+      );
+
+      fakeMqttClient.simulateInboundMessage('absorb/kids_tablet/speed/set', '1.25');
+      await Future<void>.delayed(Duration.zero);
+
+      verify(() => mockAudioPlayerService.setSpeed(1.25)).called(1);
+    });
+
+    test('clamps speed values between 0.5 and 3.0', () async {
+      await service.connect(
+        host: '192.168.1.50',
+        slug: 'kids_tablet',
+      );
+
+      // Below 0.5 clamped to 0.5
+      fakeMqttClient.simulateInboundMessage('absorb/kids_tablet/speed/set', '0.2');
+      await Future<void>.delayed(Duration.zero);
+      verify(() => mockAudioPlayerService.setSpeed(0.5)).called(1);
+
+      // Negative value clamped to 0.5
+      fakeMqttClient.simulateInboundMessage('absorb/kids_tablet/speed/set', '-1.0');
+      await Future<void>.delayed(Duration.zero);
+      verify(() => mockAudioPlayerService.setSpeed(0.5)).called(1);
+
+      // Above 3.0 clamped to 3.0
+      fakeMqttClient.simulateInboundMessage('absorb/kids_tablet/speed/set', '3.5');
+      await Future<void>.delayed(Duration.zero);
+      verify(() => mockAudioPlayerService.setSpeed(3.0)).called(1);
+
+      // 5.0 clamped to 3.0
+      fakeMqttClient.simulateInboundMessage('absorb/kids_tablet/speed/set', '5.0');
+      await Future<void>.delayed(Duration.zero);
+      verify(() => mockAudioPlayerService.setSpeed(3.0)).called(1);
+    });
+
+    test('gracefully ignores invalid non-numeric speed payloads', () async {
+      await service.connect(
+        host: '192.168.1.50',
+        slug: 'kids_tablet',
+      );
+
+      fakeMqttClient.simulateInboundMessage('absorb/kids_tablet/speed/set', 'invalid');
+      fakeMqttClient.simulateInboundMessage('absorb/kids_tablet/speed/set', '');
+      await Future<void>.delayed(Duration.zero);
+
+      verifyNever(() => mockAudioPlayerService.setSpeed(any()));
+    });
+
+    test('PLAY_PAUSE command pauses when player is currently playing', () async {
+      when(() => mockAudioPlayerService.isPlaying).thenReturn(true);
+
+      await service.connect(
+        host: '192.168.1.50',
+        slug: 'kids_tablet',
+      );
+
+      fakeMqttClient.simulateInboundMessage('absorb/kids_tablet/set', 'PLAY_PAUSE');
+      await Future<void>.delayed(Duration.zero);
+
+      verify(() => mockAudioPlayerService.pause()).called(1);
+      verifyNever(() => mockAudioPlayerService.play(fromUi: any(named: 'fromUi')));
+    });
+
+    test('PLAY_PAUSE command plays when player is currently paused', () async {
+      when(() => mockAudioPlayerService.isPlaying).thenReturn(false);
+
+      await service.connect(
+        host: '192.168.1.50',
+        slug: 'kids_tablet',
+      );
+
+      fakeMqttClient.simulateInboundMessage('absorb/kids_tablet/set', 'PLAY_PAUSE');
+      await Future<void>.delayed(Duration.zero);
+
+      verify(() => mockAudioPlayerService.play(fromUi: false)).called(1);
+      verifyNever(() => mockAudioPlayerService.pause());
+    });
+
+    test('state telemetry publish reflects updated speed and playback state', () async {
+      when(() => mockAudioPlayerService.speed).thenReturn(1.5);
+
+      await service.connect(
+        host: '192.168.1.50',
+        slug: 'kids_tablet',
+      );
+
+      fakeMqttClient.publishedMessages.clear();
+
+      fakeMqttClient.simulateInboundMessage('absorb/kids_tablet/speed/set', '1.5');
+      await Future<void>.delayed(Duration.zero);
+
+      final stateMessages = fakeMqttClient.publishedMessages
+          .where((m) => m.topic == 'absorb/kids_tablet/state')
+          .toList();
+      expect(stateMessages, isNotEmpty);
+      final latestState = jsonDecode(stateMessages.last.payload) as Map<String, dynamic>;
+      expect(latestState['speed'], equals(1.5));
+    });
+  });
 }
