@@ -5,6 +5,10 @@ import 'package:mqtt_client/mqtt_client.dart';
 import 'package:mqtt_client/mqtt_server_client.dart';
 import 'audio_player_service.dart';
 import 'sleep_timer_service.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'api_service.dart';
+import 'download_service.dart';
+import 'user_account_service.dart';
 
 
 class PublishedMqttMessage {
@@ -167,19 +171,27 @@ class MqttRemoteService {
   MqttRemoteService._()
       : _audioPlayerService = AudioPlayerService(),
         _sleepTimerService = SleepTimerService(),
+        _downloadService = DownloadService(),
+        _apiProvider = null,
         _clientAdapter = DefaultMqttClientAdapter();
 
   @visibleForTesting
   MqttRemoteService.forTesting({
     required AudioPlayerService audioPlayerService,
     SleepTimerService? sleepTimerService,
+    DownloadService? downloadService,
+    ApiService? Function()? apiProvider,
     required MqttClientAdapter clientAdapter,
   })  : _audioPlayerService = audioPlayerService,
         _sleepTimerService = sleepTimerService ?? SleepTimerService(),
+        _downloadService = downloadService ?? DownloadService(),
+        _apiProvider = apiProvider,
         _clientAdapter = clientAdapter;
 
   final AudioPlayerService _audioPlayerService;
   final SleepTimerService _sleepTimerService;
+  final DownloadService _downloadService;
+  final ApiService? Function()? _apiProvider;
   final MqttClientAdapter _clientAdapter;
 
   String _slug = 'absorb';
@@ -199,6 +211,7 @@ class MqttRemoteService {
   String get volumeTopic => 'absorb/$_slug/volume/set';
   String get sleepTimerTopic => 'absorb/$_slug/sleep_timer';
   String get sleepTimerSetTopic => 'absorb/$_slug/sleep_timer/set';
+  String get playMediaTopic => 'absorb/$_slug/play_media/set';
 
   static String sanitizeSlug(String rawSlug) {
     final sanitized = rawSlug.trim().replaceAll(RegExp(r'[^a-zA-Z0-9_-]'), '_');
@@ -244,6 +257,7 @@ class MqttRemoteService {
     _clientAdapter.subscribe(seekTopic);
     _clientAdapter.subscribe(volumeTopic);
     _clientAdapter.subscribe(sleepTimerSetTopic);
+    _clientAdapter.subscribe(playMediaTopic);
 
     // Listen to inbound commands
     await _incomingSub?.cancel();
@@ -285,6 +299,12 @@ class MqttRemoteService {
         final skipSec = await PlayerSettings.getBackSkip();
         await _audioPlayerService.skipBackward(skipSec);
         _publishState();
+      } else if (command == 'NEXT_CHAPTER') {
+        await _audioPlayerService.skipToNextChapter();
+        _publishState();
+      } else if (command == 'PREV_CHAPTER') {
+        await _audioPlayerService.skipToPreviousChapter();
+        _publishState();
       }
     } else if (topic == seekTopic) {
       final seconds = num.tryParse(payload.trim())?.toDouble();
@@ -304,6 +324,161 @@ class MqttRemoteService {
       }
     } else if (topic == sleepTimerSetTopic) {
       _handleSleepTimerCommand(payload);
+    } else if (topic == playMediaTopic) {
+      await _handlePlayMediaCommand(payload);
+    }
+  }
+
+  Future<ApiService?> _getApiService() async {
+    if (_apiProvider != null) {
+      return _apiProvider();
+    }
+    if (_audioPlayerService.currentApi != null) {
+      return _audioPlayerService.currentApi;
+    }
+    final prefs = await SharedPreferences.getInstance();
+    final url = prefs.getString('server_url');
+    final token = prefs.getString('token');
+    final refreshToken = prefs.getString('refresh_token');
+    final username = prefs.getString('username');
+    if (url == null || token == null) return null;
+    Map<String, String> customHeaders = const {};
+    final headersJson = prefs.getString('custom_headers');
+    if (headersJson != null && headersJson.isNotEmpty) {
+      try {
+        customHeaders =
+            Map<String, String>.from(jsonDecode(headersJson) as Map);
+      } catch (_) {}
+    }
+    return ApiService(
+      baseUrl: url,
+      token: token,
+      refreshToken: refreshToken,
+      isLegacyToken: refreshToken == null,
+      customHeaders: customHeaders,
+      loadPersistedTokens: () =>
+          UserAccountService().loadPersistedTokens(url, username),
+      onTokensRefreshed: (access, refresh) =>
+          UserAccountService().persistRefreshedTokens(
+        access,
+        refresh,
+        serverUrl: url,
+        username: username,
+      ),
+    );
+  }
+
+  Future<void> _handlePlayMediaCommand(String rawPayload) async {
+    final trimmed = rawPayload.trim();
+    if (trimmed.isEmpty) return;
+
+    final String itemId;
+    final String? episodeId;
+
+    try {
+      final decoded = jsonDecode(trimmed);
+      if (decoded is! Map<String, dynamic>) return;
+      final rawItemId = decoded['item_id'];
+      if (rawItemId is! String || rawItemId.trim().isEmpty) return;
+      itemId = rawItemId.trim();
+      final rawEpId = decoded['episode_id'];
+      episodeId = (rawEpId is String && rawEpId.trim().isNotEmpty)
+          ? rawEpId.trim()
+          : null;
+    } catch (_) {
+      return;
+    }
+
+    try {
+      final api = await _getApiService();
+      if (api == null) {
+        debugPrint('[MqttRemoteService] play_media: No API service available');
+        return;
+      }
+
+      if (_downloadService.isDownloaded(itemId)) {
+        final dl = _downloadService.getInfo(itemId);
+        double duration = 0.0;
+        List<dynamic> chapters = [];
+        if (dl.sessionData != null) {
+          try {
+            final session =
+                jsonDecode(dl.sessionData!) as Map<String, dynamic>;
+            duration = (session['duration'] as num?)?.toDouble() ?? 0.0;
+            chapters = (session['chapters'] as List<dynamic>?) ?? [];
+          } catch (_) {}
+        }
+
+        await _audioPlayerService.playItem(
+          api: api,
+          itemId: itemId,
+          title: dl.title ?? '',
+          author: dl.author ?? '',
+          coverUrl: dl.coverUrl,
+          totalDuration: duration,
+          chapters: chapters,
+          episodeId: episodeId,
+          episodeTitle: episodeId != null ? dl.title : null,
+          libraryId: dl.libraryId,
+        );
+        _publishState();
+        return;
+      }
+
+      final fullItem = await api.getLibraryItem(itemId);
+      if (fullItem == null) {
+        debugPrint(
+            '[MqttRemoteService] play_media: getLibraryItem returned null');
+        return;
+      }
+
+      final media = fullItem['media'] as Map<String, dynamic>? ?? {};
+      final metadata = media['metadata'] as Map<String, dynamic>? ?? {};
+      final title = metadata['title'] as String? ?? '';
+      final author = metadata['authorName'] as String? ?? '';
+      final coverUrl = api.getCoverUrl(itemId, width: 400);
+      final duration = (media['duration'] as num?)?.toDouble() ?? 0.0;
+      final chapters = (media['chapters'] as List<dynamic>?) ?? [];
+      final libraryId = fullItem['libraryId'] as String?;
+
+      if (episodeId != null) {
+        final episodes = (media['episodes'] as List<dynamic>?) ?? [];
+        final episode = episodes.cast<Map<String, dynamic>>().firstWhere(
+          (e) => e['id'] == episodeId,
+          orElse: () => <String, dynamic>{},
+        );
+        final epTitle = episode['title'] as String? ?? title;
+        final epDuration =
+            (episode['duration'] as num?)?.toDouble() ?? duration;
+        final epChapters = (episode['chapters'] as List<dynamic>?) ?? [];
+
+        await _audioPlayerService.playItem(
+          api: api,
+          itemId: itemId,
+          title: epTitle,
+          author: title,
+          coverUrl: coverUrl,
+          totalDuration: epDuration,
+          chapters: epChapters,
+          episodeId: episodeId,
+          episodeTitle: epTitle,
+          libraryId: libraryId,
+        );
+      } else {
+        await _audioPlayerService.playItem(
+          api: api,
+          itemId: itemId,
+          title: title,
+          author: author,
+          coverUrl: coverUrl,
+          totalDuration: duration,
+          chapters: chapters,
+          libraryId: libraryId,
+        );
+      }
+      _publishState();
+    } catch (e) {
+      debugPrint('[MqttRemoteService] play_media failed: $e');
     }
   }
 

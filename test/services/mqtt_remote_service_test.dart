@@ -8,12 +8,18 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:absorb/services/mqtt_remote_service.dart';
 import 'package:absorb/services/audio_player_service.dart';
 import 'package:absorb/services/sleep_timer_service.dart';
+import 'package:absorb/services/api_service.dart';
+import 'package:absorb/services/download_service.dart';
 
 
 
 class MockAudioPlayerService extends Mock implements AudioPlayerService {}
 
 class MockSleepTimerService extends Mock implements SleepTimerService {}
+
+class MockApiService extends Mock implements ApiService {}
+
+class MockDownloadService extends Mock implements DownloadService {}
 
 class FakeMqttClientAdapter implements MqttClientAdapter {
   MqttConnectionConfig? lastConfig;
@@ -69,6 +75,7 @@ void main() {
 
   setUpAll(() {
     registerFallbackValue(Duration.zero);
+    registerFallbackValue(MockApiService());
   });
 
   group('MqttRemoteService Tracer Bullet', () {
@@ -578,6 +585,256 @@ void main() {
             .length,
         equals(count + 2),
       );
+    });
+  });
+
+  group('MqttRemoteService Ticket #5: Chapter Navigation and Direct Item Playback', () {
+    late MockAudioPlayerService mockAudioPlayerService;
+    late MockApiService mockApiService;
+    late MockDownloadService mockDownloadService;
+    late FakeMqttClientAdapter fakeMqttClient;
+    late MqttRemoteService service;
+
+    setUp(() {
+      SharedPreferences.setMockInitialValues({});
+      mockAudioPlayerService = MockAudioPlayerService();
+      mockApiService = MockApiService();
+      mockDownloadService = MockDownloadService();
+      fakeMqttClient = FakeMqttClientAdapter();
+
+      when(() => mockAudioPlayerService.isPlaying).thenReturn(false);
+      when(() => mockAudioPlayerService.nowPlayingTitle).thenReturn('');
+      when(() => mockAudioPlayerService.currentTitle).thenReturn('');
+      when(() => mockAudioPlayerService.currentAuthor).thenReturn('');
+      when(() => mockAudioPlayerService.currentCoverUrl).thenReturn(null);
+      when(() => mockAudioPlayerService.totalDuration).thenReturn(0.0);
+      when(() => mockAudioPlayerService.position).thenReturn(Duration.zero);
+      when(() => mockAudioPlayerService.volume).thenReturn(1.0);
+      when(() => mockAudioPlayerService.speed).thenReturn(1.0);
+      when(() => mockAudioPlayerService.chapters).thenReturn([]);
+      when(() => mockAudioPlayerService.currentChapter).thenReturn(null);
+      when(() => mockAudioPlayerService.currentApi).thenReturn(mockApiService);
+      when(() => mockAudioPlayerService.skipToNextChapter()).thenAnswer((_) async {});
+      when(() => mockAudioPlayerService.skipToPreviousChapter()).thenAnswer((_) async {});
+      when(() => mockAudioPlayerService.playItem(
+            api: any(named: 'api'),
+            itemId: any(named: 'itemId'),
+            title: any(named: 'title'),
+            author: any(named: 'author'),
+            coverUrl: any(named: 'coverUrl'),
+            totalDuration: any(named: 'totalDuration'),
+            chapters: any(named: 'chapters'),
+            episodeId: any(named: 'episodeId'),
+            episodeTitle: any(named: 'episodeTitle'),
+            libraryId: any(named: 'libraryId'),
+          )).thenAnswer((_) async => null);
+
+      when(() => mockDownloadService.isDownloaded(any())).thenReturn(false);
+
+      service = MqttRemoteService.forTesting(
+        audioPlayerService: mockAudioPlayerService,
+        downloadService: mockDownloadService,
+        apiProvider: () => mockApiService,
+        clientAdapter: fakeMqttClient,
+      );
+    });
+
+    tearDown(() {
+      service.dispose();
+      fakeMqttClient.dispose();
+    });
+
+    test('absorb/<slug>/set handles NEXT_CHAPTER and PREV_CHAPTER', () async {
+      await service.connect(
+        host: '192.168.1.50',
+        slug: 'kids_tablet',
+      );
+
+      fakeMqttClient.simulateInboundMessage('absorb/kids_tablet/set', 'NEXT_CHAPTER');
+      await Future<void>.delayed(Duration.zero);
+      verify(() => mockAudioPlayerService.skipToNextChapter()).called(1);
+
+      fakeMqttClient.simulateInboundMessage('absorb/kids_tablet/set', 'PREV_CHAPTER');
+      await Future<void>.delayed(Duration.zero);
+      verify(() => mockAudioPlayerService.skipToPreviousChapter()).called(1);
+    });
+
+    test('subscribes to absorb/<slug>/play_media/set on connect', () async {
+      await service.connect(
+        host: '192.168.1.50',
+        slug: 'kids_tablet',
+      );
+
+      expect(fakeMqttClient.subscriptions, contains('absorb/kids_tablet/play_media/set'));
+    });
+
+    test('parses play_media JSON, fetches via ApiService, and dispatches to playItem', () async {
+      when(() => mockApiService.getLibraryItem('item-book-1')).thenAnswer((_) async => {
+            'id': 'item-book-1',
+            'libraryId': 'lib-1',
+            'media': {
+              'metadata': {
+                'title': 'The Hobbit',
+                'authorName': 'J.R.R. Tolkien',
+              },
+              'duration': 36000.0,
+              'chapters': [
+                {'title': 'An Unexpected Party', 'start': 0.0, 'end': 3000.0}
+              ],
+            },
+          });
+      when(() => mockApiService.getCoverUrl('item-book-1', width: 400))
+          .thenReturn('https://abs.local/cover.jpg');
+
+      await service.connect(
+        host: '192.168.1.50',
+        slug: 'kids_tablet',
+      );
+
+      fakeMqttClient.simulateInboundMessage(
+        'absorb/kids_tablet/play_media/set',
+        jsonEncode({'item_id': 'item-book-1'}),
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      verify(() => mockAudioPlayerService.playItem(
+            api: mockApiService,
+            itemId: 'item-book-1',
+            title: 'The Hobbit',
+            author: 'J.R.R. Tolkien',
+            coverUrl: 'https://abs.local/cover.jpg',
+            totalDuration: 36000.0,
+            chapters: [
+              {'title': 'An Unexpected Party', 'start': 0.0, 'end': 3000.0}
+            ],
+            libraryId: 'lib-1',
+          )).called(1);
+    });
+
+    test('parses play_media with optional episode_id and resolves episode', () async {
+      when(() => mockApiService.getLibraryItem('show-123')).thenAnswer((_) async => {
+            'id': 'show-123',
+            'libraryId': 'lib-podcasts',
+            'media': {
+              'metadata': {
+                'title': 'Podcast Show',
+                'authorName': 'Host Name',
+              },
+              'episodes': [
+                {
+                  'id': 'ep-999',
+                  'title': 'Episode 10: Special Guest',
+                  'duration': 1800.0,
+                  'chapters': [],
+                }
+              ],
+            },
+          });
+      when(() => mockApiService.getCoverUrl('show-123', width: 400))
+          .thenReturn('https://abs.local/podcast.jpg');
+
+      await service.connect(
+        host: '192.168.1.50',
+        slug: 'kids_tablet',
+      );
+
+      fakeMqttClient.simulateInboundMessage(
+        'absorb/kids_tablet/play_media/set',
+        jsonEncode({'item_id': 'show-123', 'episode_id': 'ep-999'}),
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      verify(() => mockAudioPlayerService.playItem(
+            api: mockApiService,
+            itemId: 'show-123',
+            title: 'Episode 10: Special Guest',
+            author: 'Podcast Show',
+            coverUrl: 'https://abs.local/podcast.jpg',
+            totalDuration: 1800.0,
+            chapters: [],
+            episodeId: 'ep-999',
+            episodeTitle: 'Episode 10: Special Guest',
+            libraryId: 'lib-podcasts',
+          )).called(1);
+    });
+
+    test('resolves metadata from DownloadService when item is downloaded', () async {
+      when(() => mockDownloadService.isDownloaded('downloaded-book-42')).thenReturn(true);
+      when(() => mockDownloadService.getInfo('downloaded-book-42')).thenReturn(DownloadInfo(
+        itemId: 'downloaded-book-42',
+        title: 'Downloaded Title',
+        author: 'Downloaded Author',
+        coverUrl: 'file:///local/cover.jpg',
+        libraryId: 'lib-downloaded',
+        sessionData: jsonEncode({
+          'duration': 7200.0,
+          'chapters': [
+            {'title': 'Chapter 1', 'start': 0.0, 'end': 7200.0}
+          ],
+        }),
+      ));
+
+      await service.connect(
+        host: '192.168.1.50',
+        slug: 'kids_tablet',
+      );
+
+      fakeMqttClient.simulateInboundMessage(
+        'absorb/kids_tablet/play_media/set',
+        jsonEncode({'item_id': 'downloaded-book-42'}),
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      verifyNever(() => mockApiService.getLibraryItem(any()));
+      verify(() => mockAudioPlayerService.playItem(
+            api: mockApiService,
+            itemId: 'downloaded-book-42',
+            title: 'Downloaded Title',
+            author: 'Downloaded Author',
+            coverUrl: 'file:///local/cover.jpg',
+            totalDuration: 7200.0,
+            chapters: [
+              {'title': 'Chapter 1', 'start': 0.0, 'end': 7200.0}
+            ],
+            libraryId: 'lib-downloaded',
+          )).called(1);
+    });
+
+    test('rejects malformed play_media payloads gracefully without crashing', () async {
+      await service.connect(
+        host: '192.168.1.50',
+        slug: 'kids_tablet',
+      );
+
+      // Empty payload
+      fakeMqttClient.simulateInboundMessage('absorb/kids_tablet/play_media/set', '');
+      await Future<void>.delayed(Duration.zero);
+
+      // Non-JSON string
+      fakeMqttClient.simulateInboundMessage('absorb/kids_tablet/play_media/set', 'not-json');
+      await Future<void>.delayed(Duration.zero);
+
+      // JSON array
+      fakeMqttClient.simulateInboundMessage('absorb/kids_tablet/play_media/set', '["item-1"]');
+      await Future<void>.delayed(Duration.zero);
+
+      // Missing item_id
+      fakeMqttClient.simulateInboundMessage('absorb/kids_tablet/play_media/set', '{"foo": "bar"}');
+      await Future<void>.delayed(Duration.zero);
+
+      // Empty item_id
+      fakeMqttClient.simulateInboundMessage('absorb/kids_tablet/play_media/set', '{"item_id": " "}');
+      await Future<void>.delayed(Duration.zero);
+
+      verifyNever(() => mockAudioPlayerService.playItem(
+            api: any(named: 'api'),
+            itemId: any(named: 'itemId'),
+            title: any(named: 'title'),
+            author: any(named: 'author'),
+            coverUrl: any(named: 'coverUrl'),
+            totalDuration: any(named: 'totalDuration'),
+            chapters: any(named: 'chapters'),
+          ));
     });
   });
 }
