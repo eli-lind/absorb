@@ -1904,4 +1904,175 @@ void main() {
       verifyNever(() => mockSleepTimerService.cancel());
     });
   });
+
+  group('MqttRemoteService Ticket #22: Home Assistant Sleep Timer Number Entity Discovery & Duration Slider', () {
+    late MockAudioPlayerService mockAudioPlayerService;
+    late MockSleepTimerService mockSleepTimerService;
+    late FakeMqttClientAdapter fakeMqttClient;
+    late MqttRemoteService service;
+
+    setUp(() async {
+      SharedPreferences.setMockInitialValues({
+        'mqtt_enabled': true,
+        'mqtt_host': '192.168.1.50',
+        'mqtt_port': 1883,
+        'mqtt_slug': 'kids_tablet',
+      });
+      await SharedPreferences.getInstance();
+      mockAudioPlayerService = MockAudioPlayerService();
+      mockSleepTimerService = MockSleepTimerService();
+      fakeMqttClient = FakeMqttClientAdapter();
+
+      when(() => mockAudioPlayerService.isPlaying).thenReturn(false);
+      when(() => mockAudioPlayerService.nowPlayingTitle).thenReturn('');
+      when(() => mockAudioPlayerService.currentTitle).thenReturn('');
+      when(() => mockAudioPlayerService.currentAuthor).thenReturn('');
+      when(() => mockAudioPlayerService.currentCoverUrl).thenReturn(null);
+      when(() => mockAudioPlayerService.totalDuration).thenReturn(0.0);
+      when(() => mockAudioPlayerService.position).thenReturn(Duration.zero);
+      when(() => mockAudioPlayerService.volume).thenReturn(1.0);
+      when(() => mockAudioPlayerService.speed).thenReturn(1.0);
+      when(() => mockAudioPlayerService.chapters).thenReturn([]);
+      when(() => mockAudioPlayerService.currentChapter).thenReturn(null);
+
+      when(() => mockSleepTimerService.isActive).thenReturn(false);
+      when(() => mockSleepTimerService.mode).thenReturn(SleepTimerMode.off);
+      when(() => mockSleepTimerService.timeRemaining).thenReturn(Duration.zero);
+      when(() => mockSleepTimerService.initialDuration).thenReturn(Duration.zero);
+
+      service = MqttRemoteService.forTesting(
+        audioPlayerService: mockAudioPlayerService,
+        sleepTimerService: mockSleepTimerService,
+        clientAdapter: fakeMqttClient,
+        enableJitter: false,
+      );
+    });
+
+    tearDown(() {
+      service.dispose();
+      fakeMqttClient.dispose();
+    });
+
+    test('publishes retained sleep timer number entity discovery configuration on connect', () async {
+      await service.connect(
+        host: '192.168.1.50',
+        slug: 'kids_tablet',
+        enableDiscovery: true,
+      );
+
+      final discoveryMsg = fakeMqttClient.publishedMessages.firstWhere(
+        (m) => m.topic == 'homeassistant/number/absorb_kids_tablet_sleep_timer/config',
+      );
+      expect(discoveryMsg.retain, isTrue);
+
+      final payload = jsonDecode(discoveryMsg.payload) as Map<String, dynamic>;
+      expect(payload['unique_id'], equals('absorb_kids_tablet_sleep_timer'));
+      expect(payload['command_topic'], equals('absorb/kids_tablet/sleep_timer/duration/set'));
+      expect(payload['min'], equals(0));
+      expect(payload['max'], equals(120));
+      expect(payload['step'], equals(5));
+      expect(payload['unit_of_measurement'], equals('min'));
+      expect(payload['unit'], equals('min'));
+      expect(payload['icon'], equals('mdi:timer-outline'));
+      expect(payload['availability_topic'], equals('absorb/kids_tablet/status'));
+      expect(payload['payload_available'], equals('online'));
+      expect(payload['payload_not_available'], equals('offline'));
+
+      final device = payload['device'] as Map<String, dynamic>;
+      expect(device['identifiers'], contains('absorb_kids_tablet'));
+      expect(device['name'], equals('Absorb (kids_tablet)'));
+    });
+
+    test('subscribes to absorb/<slug>/sleep_timer/duration/set upon connection', () async {
+      await service.connect(
+        host: '192.168.1.50',
+        slug: 'kids_tablet',
+      );
+
+      expect(
+        fakeMqttClient.subscriptions,
+        contains('absorb/kids_tablet/sleep_timer/duration/set'),
+      );
+    });
+
+    test('inbound positive duration payload sets sleep timer for that duration', () async {
+      await service.connect(
+        host: '192.168.1.50',
+        slug: 'kids_tablet',
+      );
+
+      fakeMqttClient.simulateInboundMessage(
+        'absorb/kids_tablet/sleep_timer/duration/set',
+        '30',
+      );
+      await Future<void>.delayed(Duration.zero);
+      verify(() => mockSleepTimerService.setTimeSleep(const Duration(minutes: 30))).called(1);
+
+      // Float representation
+      fakeMqttClient.simulateInboundMessage(
+        'absorb/kids_tablet/sleep_timer/duration/set',
+        '45.0',
+      );
+      await Future<void>.delayed(Duration.zero);
+      verify(() => mockSleepTimerService.setTimeSleep(const Duration(minutes: 45))).called(1);
+
+      // Clamps values above 120
+      fakeMqttClient.simulateInboundMessage(
+        'absorb/kids_tablet/sleep_timer/duration/set',
+        '150',
+      );
+      await Future<void>.delayed(Duration.zero);
+      verify(() => mockSleepTimerService.setTimeSleep(const Duration(minutes: 120))).called(1);
+    });
+
+    test('inbound 0 duration payload cancels active sleep timer', () async {
+      await service.connect(
+        host: '192.168.1.50',
+        slug: 'kids_tablet',
+      );
+
+      fakeMqttClient.simulateInboundMessage(
+        'absorb/kids_tablet/sleep_timer/duration/set',
+        '0',
+      );
+      await Future<void>.delayed(Duration.zero);
+      verify(() => mockSleepTimerService.cancel()).called(1);
+
+      fakeMqttClient.simulateInboundMessage(
+        'absorb/kids_tablet/sleep_timer/duration/set',
+        '0.0',
+      );
+      await Future<void>.delayed(Duration.zero);
+      verify(() => mockSleepTimerService.cancel()).called(1);
+    });
+
+    test('unpublishDiscovery emits empty retained discovery messages across discovery topics', () async {
+      await service.connect(
+        host: '192.168.1.50',
+        slug: 'kids_tablet',
+        enableDiscovery: true,
+      );
+
+      service.unpublishDiscovery();
+
+      final unpublishedNumber = fakeMqttClient.publishedMessages.firstWhere(
+        (m) => m.topic == 'homeassistant/number/absorb_kids_tablet_sleep_timer/config' && m.payload.isEmpty,
+      );
+      expect(unpublishedNumber.retain, isTrue);
+    });
+
+    test('disconnect emits offline availability status retained', () async {
+      await service.connect(
+        host: '192.168.1.50',
+        slug: 'kids_tablet',
+      );
+
+      service.disconnect();
+
+      final offlineMsg = fakeMqttClient.publishedMessages.firstWhere(
+        (m) => m.topic == 'absorb/kids_tablet/status' && m.payload == 'offline',
+      );
+      expect(offlineMsg.retain, isTrue);
+    });
+  });
 }
