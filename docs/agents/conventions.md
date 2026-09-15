@@ -18,3 +18,7 @@ Key architectural facts and APIs for agents working in this repository.
 
 - `ScopedPrefs` scopes keys per logged-in user account.
 - Any device-level or fleet configuration (e.g. MQTT broker host, port, credentials, device slug) **must** be registered in `ScopedPrefs._globalKeys` or written directly to `SharedPreferences` so it survives account switching, logouts, and pre-login application states.
+
+## 4. Async Stream & Event Loop Testing
+
+- **Broadcast Stream Microtask Yield**: In Dart, broadcasting events onto a `StreamController.broadcast()` schedules listener callbacks asynchronously on the microtask loop. Testing code that simulates inbound stream events (e.g. `simulateInboundMessage`) must yield to the event loop via `await Future<void>.delayed(Duration.zero);` or `async.flushMicrotasks()` (in `fakeAsync`) before asserting downstream mock invocations.
