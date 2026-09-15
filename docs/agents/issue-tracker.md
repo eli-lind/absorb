@@ -11,7 +11,7 @@ Issues and PRDs for this repo live as GitHub issues on `eli-lind/absorb`. Use th
 - **Apply / remove labels**: `gh issue edit <number> --add-label "..."` / `--remove-label "..."`
 - **Close**: `gh issue close <number> --comment "..."`
 
-Infer the repo from `git remote -v` — `gh` does this automatically when run inside a clone.
+Ensure `gh repo set-default eli-lind/absorb` is set when an `upstream` remote exists so `gh` targets the fork rather than upstream.
 
 ## Pull requests as a triage surface
 
