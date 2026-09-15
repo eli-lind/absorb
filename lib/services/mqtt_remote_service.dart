@@ -873,22 +873,47 @@ class MqttRemoteService extends ChangeNotifier {
     final trimmed = rawPayload.trim();
     if (trimmed.isEmpty) return;
 
-    try {
-      final decoded = jsonDecode(trimmed);
-      if (decoded is! Map<String, dynamic>) return;
-
-      if (decoded['cancel'] == true) {
-        _sleepTimerService.cancel();
-      } else if (decoded['mode'] == 'end_of_chapter') {
-        _sleepTimerService.setChapterSleep(1);
-      } else if (decoded['duration_minutes'] is num) {
-        final minutes = (decoded['duration_minutes'] as num).toInt();
-        if (minutes > 0) {
-          _sleepTimerService.setTimeSleep(Duration(minutes: minutes));
+    if (trimmed.startsWith('{')) {
+      try {
+        final decoded = jsonDecode(trimmed);
+        if (decoded is Map<String, dynamic>) {
+          if (decoded['cancel'] == true) {
+            _sleepTimerService.cancel();
+          } else if (decoded['mode'] == 'end_of_chapter' || decoded['mode'] == 'chapter') {
+            _sleepTimerService.setChapterSleep(1);
+          } else if (decoded['duration_minutes'] is num) {
+            final durationVal = decoded['duration_minutes'] as num;
+            if (durationVal.isFinite && durationVal.toInt() > 0) {
+              _sleepTimerService.setTimeSleep(Duration(minutes: durationVal.toInt()));
+            }
+          }
+          return;
         }
+      } catch (_) {
+        // Fall through to non-JSON parsing
       }
-    } catch (_) {
-      // Malformed JSON is ignored
+    }
+
+    var unquoted = trimmed;
+    if (unquoted.startsWith('"') && unquoted.endsWith('"') && unquoted.length >= 2) {
+      unquoted = unquoted.substring(1, unquoted.length - 1).trim();
+    }
+
+    final lower = unquoted.toLowerCase();
+    if (lower == 'cancel') {
+      _sleepTimerService.cancel();
+      return;
+    }
+
+    if (lower == 'end_of_chapter' || lower == 'chapter') {
+      _sleepTimerService.setChapterSleep(1);
+      return;
+    }
+
+    final minutes = int.tryParse(unquoted);
+    if (minutes != null && minutes > 0) {
+      _sleepTimerService.setTimeSleep(Duration(minutes: minutes));
+      return;
     }
   }
 

@@ -1708,4 +1708,200 @@ void main() {
       expect(latestState['state'], equals('playing'));
     });
   });
+
+  group('MqttRemoteService Ticket #21: Permissive Sleep Timer Command Parsing', () {
+    late MockAudioPlayerService mockAudioPlayerService;
+    late MockSleepTimerService mockSleepTimerService;
+    late FakeMqttClientAdapter fakeMqttClient;
+    late MqttRemoteService service;
+
+    setUp(() async {
+      SharedPreferences.setMockInitialValues({
+        'mqtt_enabled': true,
+        'mqtt_host': '192.168.1.50',
+        'mqtt_port': 1883,
+        'mqtt_slug': 'kids_tablet',
+      });
+      await SharedPreferences.getInstance();
+      mockAudioPlayerService = MockAudioPlayerService();
+      mockSleepTimerService = MockSleepTimerService();
+      fakeMqttClient = FakeMqttClientAdapter();
+
+      when(() => mockAudioPlayerService.isPlaying).thenReturn(false);
+      when(() => mockAudioPlayerService.nowPlayingTitle).thenReturn('');
+      when(() => mockAudioPlayerService.currentTitle).thenReturn('');
+      when(() => mockAudioPlayerService.currentAuthor).thenReturn('');
+      when(() => mockAudioPlayerService.currentCoverUrl).thenReturn(null);
+      when(() => mockAudioPlayerService.totalDuration).thenReturn(0.0);
+      when(() => mockAudioPlayerService.position).thenReturn(Duration.zero);
+      when(() => mockAudioPlayerService.volume).thenReturn(1.0);
+      when(() => mockAudioPlayerService.speed).thenReturn(1.0);
+      when(() => mockAudioPlayerService.chapters).thenReturn([]);
+      when(() => mockAudioPlayerService.currentChapter).thenReturn(null);
+
+      when(() => mockSleepTimerService.isActive).thenReturn(false);
+      when(() => mockSleepTimerService.mode).thenReturn(SleepTimerMode.off);
+      when(() => mockSleepTimerService.timeRemaining).thenReturn(Duration.zero);
+      when(() => mockSleepTimerService.initialDuration).thenReturn(Duration.zero);
+
+      service = MqttRemoteService.forTesting(
+        audioPlayerService: mockAudioPlayerService,
+        sleepTimerService: mockSleepTimerService,
+        clientAdapter: fakeMqttClient,
+        enableJitter: false,
+      );
+    });
+
+    tearDown(() {
+      service.dispose();
+      fakeMqttClient.dispose();
+    });
+
+    test('inbound payload "cancel" cancels the active sleep timer', () async {
+      await service.connect(
+        host: '192.168.1.50',
+        slug: 'kids_tablet',
+      );
+
+      fakeMqttClient.simulateInboundMessage(
+        'absorb/kids_tablet/sleep_timer/set',
+        'cancel',
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      verify(() => mockSleepTimerService.cancel()).called(1);
+
+      // Case insensitive
+      fakeMqttClient.simulateInboundMessage(
+        'absorb/kids_tablet/sleep_timer/set',
+        'CANCEL',
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      verify(() => mockSleepTimerService.cancel()).called(1);
+    });
+
+    test('inbound payload "end_of_chapter" or "chapter" sets end-of-chapter sleep timer', () async {
+      await service.connect(
+        host: '192.168.1.50',
+        slug: 'kids_tablet',
+      );
+
+      fakeMqttClient.simulateInboundMessage(
+        'absorb/kids_tablet/sleep_timer/set',
+        'end_of_chapter',
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      verify(() => mockSleepTimerService.setChapterSleep(1)).called(1);
+
+      fakeMqttClient.simulateInboundMessage(
+        'absorb/kids_tablet/sleep_timer/set',
+        'chapter',
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      verify(() => mockSleepTimerService.setChapterSleep(1)).called(1);
+
+      // Uppercase variant
+      fakeMqttClient.simulateInboundMessage(
+        'absorb/kids_tablet/sleep_timer/set',
+        'END_OF_CHAPTER',
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      verify(() => mockSleepTimerService.setChapterSleep(1)).called(1);
+    });
+
+    test('inbound raw integer or numeric string sets timed sleep timer for that duration in minutes', () async {
+      await service.connect(
+        host: '192.168.1.50',
+        slug: 'kids_tablet',
+      );
+
+      fakeMqttClient.simulateInboundMessage(
+        'absorb/kids_tablet/sleep_timer/set',
+        '15',
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      verify(() => mockSleepTimerService.setTimeSleep(const Duration(minutes: 15))).called(1);
+
+      fakeMqttClient.simulateInboundMessage(
+        'absorb/kids_tablet/sleep_timer/set',
+        '45',
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      verify(() => mockSleepTimerService.setTimeSleep(const Duration(minutes: 45))).called(1);
+    });
+
+    test('existing JSON payloads continue to function without regression', () async {
+      await service.connect(
+        host: '192.168.1.50',
+        slug: 'kids_tablet',
+      );
+
+      fakeMqttClient.simulateInboundMessage(
+        'absorb/kids_tablet/sleep_timer/set',
+        jsonEncode({'duration_minutes': 30}),
+      );
+      await Future<void>.delayed(Duration.zero);
+      verify(() => mockSleepTimerService.setTimeSleep(const Duration(minutes: 30))).called(1);
+
+      fakeMqttClient.simulateInboundMessage(
+        'absorb/kids_tablet/sleep_timer/set',
+        jsonEncode({'mode': 'end_of_chapter'}),
+      );
+      await Future<void>.delayed(Duration.zero);
+      verify(() => mockSleepTimerService.setChapterSleep(1)).called(1);
+
+      fakeMqttClient.simulateInboundMessage(
+        'absorb/kids_tablet/sleep_timer/set',
+        jsonEncode({'cancel': true}),
+      );
+      await Future<void>.delayed(Duration.zero);
+      verify(() => mockSleepTimerService.cancel()).called(1);
+    });
+
+    test('inbound quoted string commands and numbers are parsed correctly', () async {
+      await service.connect(
+        host: '192.168.1.50',
+        slug: 'kids_tablet',
+      );
+
+      fakeMqttClient.simulateInboundMessage('absorb/kids_tablet/sleep_timer/set', '"cancel"');
+      await Future<void>.delayed(Duration.zero);
+      verify(() => mockSleepTimerService.cancel()).called(1);
+
+      fakeMqttClient.simulateInboundMessage('absorb/kids_tablet/sleep_timer/set', '"end_of_chapter"');
+      await Future<void>.delayed(Duration.zero);
+      verify(() => mockSleepTimerService.setChapterSleep(1)).called(1);
+
+      fakeMqttClient.simulateInboundMessage('absorb/kids_tablet/sleep_timer/set', '"30"');
+      await Future<void>.delayed(Duration.zero);
+      verify(() => mockSleepTimerService.setTimeSleep(const Duration(minutes: 30))).called(1);
+    });
+
+    test('gracefully ignores invalid, empty, or non-positive sleep timer payloads', () async {
+      await service.connect(
+        host: '192.168.1.50',
+        slug: 'kids_tablet',
+      );
+
+      fakeMqttClient.simulateInboundMessage('absorb/kids_tablet/sleep_timer/set', '');
+      fakeMqttClient.simulateInboundMessage('absorb/kids_tablet/sleep_timer/set', '   ');
+      fakeMqttClient.simulateInboundMessage('absorb/kids_tablet/sleep_timer/set', 'invalid_mode');
+      fakeMqttClient.simulateInboundMessage('absorb/kids_tablet/sleep_timer/set', '-10');
+      fakeMqttClient.simulateInboundMessage('absorb/kids_tablet/sleep_timer/set', '0');
+      fakeMqttClient.simulateInboundMessage('absorb/kids_tablet/sleep_timer/set', 'Infinity');
+      fakeMqttClient.simulateInboundMessage('absorb/kids_tablet/sleep_timer/set', '{malformed json');
+      fakeMqttClient.simulateInboundMessage('absorb/kids_tablet/sleep_timer/set', jsonEncode({'cancel': false}));
+      await Future<void>.delayed(Duration.zero);
+
+      verifyNever(() => mockSleepTimerService.setTimeSleep(any()));
+      verifyNever(() => mockSleepTimerService.setChapterSleep(any()));
+      verifyNever(() => mockSleepTimerService.cancel());
+    });
+  });
 }
