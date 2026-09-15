@@ -212,6 +212,12 @@ class MqttRemoteService {
   String get sleepTimerTopic => 'absorb/$_slug/sleep_timer';
   String get sleepTimerSetTopic => 'absorb/$_slug/sleep_timer/set';
   String get playMediaTopic => 'absorb/$_slug/play_media/set';
+  String get discoveryMediaPlayerTopic =>
+      'homeassistant/media_player/absorb_$_slug/config';
+  String get discoverySleepTimerSensorTopic =>
+      'homeassistant/sensor/absorb_${_slug}_sleep_timer/config';
+  String get discoverySleepChapterButtonTopic =>
+      'homeassistant/button/absorb_${_slug}_sleep_chapter/config';
 
   static String sanitizeSlug(String rawSlug) {
     final sanitized = rawSlug.trim().replaceAll(RegExp(r'[^a-zA-Z0-9_-]'), '_');
@@ -225,6 +231,7 @@ class MqttRemoteService {
     String? username,
     String? password,
     bool useTls = false,
+    bool enableDiscovery = true,
   }) async {
     _slug = sanitizeSlug(slug);
     final resolvedPort = port ?? (useTls ? 8883 : 1883);
@@ -281,7 +288,111 @@ class MqttRemoteService {
     onPlayerStateChanged(force: true);
     onSleepTimerChanged(force: true);
 
+    if (enableDiscovery) {
+      publishDiscovery();
+    }
+
     return true;
+  }
+
+  Map<String, dynamic> buildDeviceMetadata() {
+    final model = ApiService.deviceModel.isNotEmpty
+        ? ApiService.deviceModel
+        : 'Absorb Client';
+    final manufacturer = ApiService.deviceManufacturer.isNotEmpty
+        ? ApiService.deviceManufacturer
+        : 'Absorb';
+    final swVersion = ApiService.appVersionFull.isNotEmpty
+        ? ApiService.appVersionFull
+        : '1.0.0';
+
+    return {
+      'identifiers': ['absorb_$_slug'],
+      'name': 'Absorb ($_slug)',
+      'model': model,
+      'manufacturer': manufacturer,
+      'sw_version': swVersion,
+    };
+  }
+
+  Map<String, dynamic> buildMediaPlayerDiscoveryPayload() {
+    return {
+      'name': 'Absorb ($_slug)',
+      'unique_id': 'absorb_${_slug}_media_player',
+      'state_topic': stateTopic,
+      'command_topic': commandTopic,
+      'seek_topic': seekTopic,
+      'volume_command_topic': volumeTopic,
+      'volume_state_topic': stateTopic,
+      'volume_state_template': '{{ value_json.volume }}',
+      'availability_topic': statusTopic,
+      'payload_available': 'online',
+      'payload_not_available': 'offline',
+      'payload_play': 'PLAY',
+      'payload_pause': 'PAUSE',
+      'payload_stop': 'STOP',
+      'payload_next_track': 'NEXT_CHAPTER',
+      'payload_previous_track': 'PREV_CHAPTER',
+      'supported_features': [
+        'play',
+        'pause',
+        'stop',
+        'seek',
+        'volume_set',
+        'next_track',
+        'previous_track',
+        'play_media',
+      ],
+      'device': buildDeviceMetadata(),
+    };
+  }
+
+  Map<String, dynamic> buildSleepTimerSensorDiscoveryPayload() {
+    return {
+      'name': 'Absorb ($_slug) Sleep Timer',
+      'unique_id': 'absorb_${_slug}_sleep_timer',
+      'state_topic': sleepTimerTopic,
+      'value_template': '{{ value_json.remaining_seconds }}',
+      'unit_of_measurement': 's',
+      'device_class': 'duration',
+      'availability_topic': statusTopic,
+      'payload_available': 'online',
+      'payload_not_available': 'offline',
+      'icon': 'mdi:timer-sand',
+      'device': buildDeviceMetadata(),
+    };
+  }
+
+  Map<String, dynamic> buildSleepChapterButtonDiscoveryPayload() {
+    return {
+      'name': 'Absorb ($_slug) Sleep End of Chapter',
+      'unique_id': 'absorb_${_slug}_sleep_chapter',
+      'command_topic': sleepTimerSetTopic,
+      'payload_press': jsonEncode({'mode': 'end_of_chapter'}),
+      'availability_topic': statusTopic,
+      'payload_available': 'online',
+      'payload_not_available': 'offline',
+      'icon': 'mdi:timer-off-outline',
+      'device': buildDeviceMetadata(),
+    };
+  }
+
+  void publishDiscovery() {
+    _clientAdapter.publish(
+      discoveryMediaPlayerTopic,
+      jsonEncode(buildMediaPlayerDiscoveryPayload()),
+      retain: true,
+    );
+    _clientAdapter.publish(
+      discoverySleepTimerSensorTopic,
+      jsonEncode(buildSleepTimerSensorDiscoveryPayload()),
+      retain: true,
+    );
+    _clientAdapter.publish(
+      discoverySleepChapterButtonTopic,
+      jsonEncode(buildSleepChapterButtonDiscoveryPayload()),
+      retain: true,
+    );
   }
 
   Future<void> _handleInboundMessage(String topic, String payload) async {
@@ -291,6 +402,8 @@ class MqttRemoteService {
         await _audioPlayerService.play(fromUi: false);
       } else if (command == 'PAUSE') {
         await _audioPlayerService.pause();
+      } else if (command == 'STOP') {
+        await _audioPlayerService.stop();
       } else if (command == 'SKIP_FORWARD') {
         final skipSec = await PlayerSettings.getForwardSkip();
         await _audioPlayerService.skipForward(skipSec);
@@ -299,9 +412,9 @@ class MqttRemoteService {
         final skipSec = await PlayerSettings.getBackSkip();
         await _audioPlayerService.skipBackward(skipSec);
         _publishState();
-      } else if (command == 'NEXT_CHAPTER') {
+      } else if (command == 'NEXT_CHAPTER' || command == 'NEXT') {
         await _audioPlayerService.skipToNextChapter();
-      } else if (command == 'PREV_CHAPTER') {
+      } else if (command == 'PREV_CHAPTER' || command == 'PREVIOUS') {
         await _audioPlayerService.skipToPreviousChapter();
       }
     } else if (topic == seekTopic) {
