@@ -1,6 +1,6 @@
 # Issue Tracker Adapter
 
-- **Platform**: GitHub Issues (`eli-lindner/absorb`)
+- **Platform**: GitHub Issues (`eli-lind/absorb`)
 - **Forks Note**: GitHub disables issues on forks by default. Enable via `gh repo edit <owner>/<repo> --enable-issues`.
 - **Epic Grouping**: GitHub Milestones (`MQTT Remote Control`).
 - **Triage Roles & Labels**:
