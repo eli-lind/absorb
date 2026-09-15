@@ -193,15 +193,7 @@ enum MqttConnectionStatus {
 
 class MqttRemoteService extends ChangeNotifier {
   static final MqttRemoteService _instance = MqttRemoteService._();
-  factory MqttRemoteService({
-    Stream<List<ConnectivityResult>>? connectivityStream,
-  }) {
-    if (connectivityStream != null) {
-      _instance._subscribeConnectivity(connectivityStream);
-    }
-    return _instance;
-  }
-
+  factory MqttRemoteService() => _instance;
   MqttRemoteService._({
     Stream<List<ConnectivityResult>>? connectivityStream,
   })  : _audioPlayerService = AudioPlayerService(),
@@ -254,11 +246,6 @@ class MqttRemoteService extends ChangeNotifier {
   @visibleForTesting
   bool get isNetworkOnline => _isNetworkOnline;
 
-  @visibleForTesting
-  void setConnectivityStreamForTesting(Stream<List<ConnectivityResult>> stream) {
-    _subscribeConnectivity(stream);
-  }
-
   void _subscribeConnectivity(Stream<List<ConnectivityResult>> stream) {
     _connectivitySub?.cancel();
     _connectivitySub = stream.listen((results) {
@@ -266,16 +253,14 @@ class MqttRemoteService extends ChangeNotifier {
     });
   }
 
-  @visibleForTesting
-  Future<void> handleConnectivityChanged(List<ConnectivityResult> results) =>
-      _handleConnectivityChanged(results);
-
   Future<void> _handleConnectivityChanged(
     List<ConnectivityResult> results,
   ) async {
-    final isOnline = results.isNotEmpty &&
-        !results.contains(ConnectivityResult.none) &&
-        results.any((r) => r != ConnectivityResult.none);
+    final isOnline = results.any((r) =>
+        r == ConnectivityResult.wifi ||
+        r == ConnectivityResult.mobile ||
+        r == ConnectivityResult.ethernet ||
+        r == ConnectivityResult.vpn);
     final wasOffline = !_isNetworkOnline;
     _isNetworkOnline = isOnline;
 
