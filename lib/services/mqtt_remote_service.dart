@@ -873,22 +873,55 @@ class MqttRemoteService extends ChangeNotifier {
     final trimmed = rawPayload.trim();
     if (trimmed.isEmpty) return;
 
-    try {
-      final decoded = jsonDecode(trimmed);
-      if (decoded is! Map<String, dynamic>) return;
-
-      if (decoded['cancel'] == true) {
-        _sleepTimerService.cancel();
-      } else if (decoded['mode'] == 'end_of_chapter') {
-        _sleepTimerService.setChapterSleep(1);
-      } else if (decoded['duration_minutes'] is num) {
-        final minutes = (decoded['duration_minutes'] as num).toInt();
-        if (minutes > 0) {
-          _sleepTimerService.setTimeSleep(Duration(minutes: minutes));
+    if (trimmed.startsWith('{')) {
+      try {
+        final decoded = jsonDecode(trimmed);
+        if (decoded is Map<String, dynamic>) {
+          if (decoded['cancel'] == true) {
+            _sleepTimerService.cancel();
+            return;
+          } else if (decoded['mode'] == 'end_of_chapter' || decoded['mode'] == 'chapter') {
+            _sleepTimerService.setChapterSleep(1);
+            return;
+          } else if (decoded['duration_minutes'] is num) {
+            final minutes = (decoded['duration_minutes'] as num).toInt();
+            if (minutes > 0) {
+              _sleepTimerService.setTimeSleep(Duration(minutes: minutes));
+            }
+            return;
+          }
         }
+      } catch (_) {
+        // Fall through to non-JSON parsing
       }
-    } catch (_) {
-      // Malformed JSON is ignored
+    }
+
+    var unquoted = trimmed;
+    if ((unquoted.startsWith('"') && unquoted.endsWith('"')) ||
+        (unquoted.startsWith("'") && unquoted.endsWith("'"))) {
+      if (unquoted.length >= 2) {
+        unquoted = unquoted.substring(1, unquoted.length - 1).trim();
+      }
+    }
+
+    final lower = unquoted.toLowerCase();
+    if (lower == 'cancel') {
+      _sleepTimerService.cancel();
+      return;
+    }
+
+    if (lower == 'end_of_chapter' || lower == 'chapter') {
+      _sleepTimerService.setChapterSleep(1);
+      return;
+    }
+
+    final numeric = num.tryParse(unquoted);
+    if (numeric != null) {
+      final minutes = numeric.toInt();
+      if (minutes > 0) {
+        _sleepTimerService.setTimeSleep(Duration(minutes: minutes));
+      }
+      return;
     }
   }
 
