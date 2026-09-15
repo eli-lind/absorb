@@ -35,7 +35,12 @@ class ScopedPrefs {
     'widget_item_id', 'widget_episode_id',
     'cached_stats', 'cached_sessions',
     'update_last_check', 'update_dismissed_version',
+    'mqtt_enabled', 'mqtt_host', 'mqtt_port', 'mqtt_username', 'mqtt_password',
+    'mqtt_slug', 'mqtt_discovery_enabled', 'mqtt_use_tls',
   };
+
+  /// Set of global (not per-user) preferences keys.
+  static Set<String> get globalKeys => Set.unmodifiable(_globalKeys);
 
   /// One-time migration: copy unscoped settings to the active scope.
   /// This handles the case where settings were written before scope was

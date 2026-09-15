@@ -32,6 +32,8 @@ import '../services/settings_sync_service.dart';
 import '../screens/change_password_screen.dart';
 import '../screens/auth_sessions_screen.dart';
 import '../screens/transcription_settings_screen.dart';
+import '../screens/mqtt_settings_screen.dart';
+import '../services/mqtt_remote_service.dart';
 import '../main.dart' show applyThemeMode, applyTrustAllCerts, applyFlatBackground, applyColorSource, applyManualSeed, applyGradientIntensity, applyUseColorEverywhere, applyEinkModeTheme, applyOrientationLock, localeNotifier, flatNotifier, gradientIntensityNotifier, snappyTransitionsNotifier;
 import '../services/wording.dart';
 import '../utils/share_origin.dart';
@@ -4259,6 +4261,31 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
                 const SizedBox(height: 10),
 
+                // ── Remote Control (MQTT) ──
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 16),
+                  child: Card(
+                    elevation: 0,
+                    color: cs.surfaceContainerHigh,
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                    child: ListTile(
+                      leading: Icon(Icons.settings_remote_rounded, color: cs.primary),
+                      title: const Text('Remote Control (MQTT)'),
+                      subtitle: Text(_mqttStatusSubtitle(),
+                        style: tt.bodySmall?.copyWith(color: cs.onSurfaceVariant)),
+                      trailing: Icon(Icons.chevron_right_rounded, color: cs.onSurfaceVariant),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                      onTap: () async {
+                        await Navigator.push(context,
+                          MaterialPageRoute(builder: (_) => const MqttSettingsScreen()));
+                        if (mounted) setState(() {});
+                      },
+                    ),
+                  ),
+                ),
+
+                const SizedBox(height: 10),
+
                 // ── All Bookmarks ──
                 Padding(
                   padding: const EdgeInsets.symmetric(horizontal: 16),
@@ -4683,6 +4710,20 @@ class _SettingsScreenState extends State<SettingsScreen> {
     if (d.inMinutes < 60) return l.minutesAgo(d.inMinutes);
     if (d.inHours < 24) return l.hoursAgo(d.inHours);
     return l.daysAgo(d.inDays);
+  }
+
+  String _mqttStatusSubtitle() {
+    final status = MqttRemoteService().connectionStatus;
+    switch (status) {
+      case MqttConnectionStatus.connected:
+        return 'Connected';
+      case MqttConnectionStatus.connecting:
+        return 'Connecting...';
+      case MqttConnectionStatus.error:
+        return 'Connection Error';
+      case MqttConnectionStatus.disconnected:
+        return 'Configure remote playback and state sync';
+    }
   }
 
   Future<void> _refreshSyncStatus() async {

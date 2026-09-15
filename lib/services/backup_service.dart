@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:package_info_plus/package_info_plus.dart';
@@ -5,6 +6,8 @@ import '../utils/episode_key.dart';
 import '../widgets/nav_hold_options.dart'
     show navHoldTabs, navHoldPrefKey, navHoldMenuPrefKey;
 import 'audio_player_service.dart';
+import 'mqtt_remote_service.dart';
+import 'mqtt_settings.dart';
 import 'reader_font_service.dart';
 import 'scoped_prefs.dart';
 import 'sleep_timer_service.dart';
@@ -443,6 +446,7 @@ class BackupService {
       if (navHold.isNotEmpty) 'navHold': navHold,
       'podcastPrefs': podcastPrefs,
       'customDownloadPath': customDownloadPath,
+      'mqtt': await MqttSettings.toMap(),
       if (settingsSync.isNotEmpty) 'settingsSync': settingsSync,
       'accounts': accounts,
       'customHeaders': customHeaders,
@@ -1040,6 +1044,15 @@ class BackupService {
     final customDownloadPath = data['customDownloadPath'] as String?;
     if (customDownloadPath != null) {
       await prefs.setString('custom_download_path', customDownloadPath);
+    }
+
+    // MQTT Remote Control settings (GLOBAL)
+    final mqttData = data['mqtt'] as Map<String, dynamic>?;
+    if (mqttData != null) {
+      await MqttSettings.fromMap(mqttData);
+      if (await MqttSettings.isEnabled()) {
+        unawaited(MqttRemoteService().connectFromSettings());
+      }
     }
 
     PlayerSettings.notifySettingsChanged();

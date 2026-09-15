@@ -37,6 +37,8 @@ import 'services/home_widget_service.dart';
 import 'services/log_service.dart';
 import 'services/quick_actions_service.dart';
 import 'services/setup_link_service.dart';
+import 'services/mqtt_remote_service.dart';
+import 'services/mqtt_settings.dart';
 import 'services/wording.dart';
 import 'screens/login_screen.dart';
 import 'screens/app_shell.dart';
@@ -835,6 +837,15 @@ class _AuthGateState extends State<AuthGate> {
       // Depends on AudioPlayerService + HomeWidgetService so they're ready
       // when the shortcut handler fires.
       await QuickActionsService().init();
+
+      // Initialize MQTT remote control in background if enabled
+      try {
+        if (await MqttSettings.isEnabled()) {
+          unawaited(MqttRemoteService().connectFromSettings());
+        }
+      } catch (e) {
+        debugPrint('[Init] MQTT remote service init failed: $e');
+      }
     } catch (e) {
       debugPrint('[Init] Service init failed: $e');
     }

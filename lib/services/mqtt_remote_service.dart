@@ -9,6 +9,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'api_service.dart';
 import 'download_service.dart';
 import 'user_account_service.dart';
+import 'mqtt_settings.dart';
 
 
 class PublishedMqttMessage {
@@ -165,7 +166,14 @@ typedef _SleepTimerSnapshot = ({
   int initialMinutes,
 });
 
-class MqttRemoteService {
+enum MqttConnectionStatus {
+  disconnected,
+  connecting,
+  connected,
+  error,
+}
+
+class MqttRemoteService extends ChangeNotifier {
   static final MqttRemoteService _instance = MqttRemoteService._();
   factory MqttRemoteService() => _instance;
   MqttRemoteService._()
@@ -193,6 +201,9 @@ class MqttRemoteService {
   final DownloadService _downloadService;
   final ApiService? Function()? _apiProvider;
   final MqttClientAdapter _clientAdapter;
+
+  MqttConnectionStatus _connectionStatus = MqttConnectionStatus.disconnected;
+  MqttConnectionStatus get connectionStatus => _connectionStatus;
 
   String _slug = 'absorb';
   StreamSubscription? _incomingSub;
@@ -224,6 +235,41 @@ class MqttRemoteService {
     return sanitized.isEmpty ? 'absorb' : sanitized.toLowerCase();
   }
 
+  void _setConnectionStatus(MqttConnectionStatus status) {
+    if (_connectionStatus == status) return;
+    _connectionStatus = status;
+    notifyListeners();
+  }
+
+  Future<bool> connectFromSettings() async {
+    final enabled = await MqttSettings.isEnabled();
+    if (!enabled) {
+      disconnect();
+      return false;
+    }
+    final host = await MqttSettings.getHost();
+    if (host.isEmpty) {
+      disconnect();
+      return false;
+    }
+    final port = await MqttSettings.getPort();
+    final slug = await MqttSettings.getSlug();
+    final username = await MqttSettings.getUsername();
+    final password = await MqttSettings.getPassword();
+    final discovery = await MqttSettings.isDiscoveryEnabled();
+    final tls = await MqttSettings.useTls();
+
+    return connect(
+      host: host,
+      port: port,
+      slug: slug,
+      username: username.isNotEmpty ? username : null,
+      password: password.isNotEmpty ? password : null,
+      useTls: tls,
+      enableDiscovery: discovery,
+    );
+  }
+
   Future<bool> connect({
     required String host,
     int? port,
@@ -233,6 +279,7 @@ class MqttRemoteService {
     bool useTls = false,
     bool enableDiscovery = true,
   }) async {
+    _setConnectionStatus(MqttConnectionStatus.connecting);
     _slug = sanitizeSlug(slug);
     final resolvedPort = port ?? (useTls ? 8883 : 1883);
     final clientIdentifier =
@@ -251,48 +298,56 @@ class MqttRemoteService {
       useTls: useTls,
     );
 
-    final success = await _clientAdapter.connect(config);
-    if (!success) {
+    try {
+      final success = await _clientAdapter.connect(config);
+      if (!success) {
+        _setConnectionStatus(MqttConnectionStatus.error);
+        return false;
+      }
+
+      // Publish online status retained
+      _clientAdapter.publish(statusTopic, 'online', retain: true);
+
+      // Subscribe to command and control topics
+      _clientAdapter.subscribe(commandTopic);
+      _clientAdapter.subscribe(seekTopic);
+      _clientAdapter.subscribe(volumeTopic);
+      _clientAdapter.subscribe(sleepTimerSetTopic);
+      _clientAdapter.subscribe(playMediaTopic);
+
+      // Listen to inbound commands
+      await _incomingSub?.cancel();
+      _incomingSub = _clientAdapter.incomingMessages.listen((msg) {
+        _handleInboundMessage(msg.topic, msg.payload);
+      });
+
+      // Attach listener for playback state changes
+      if (!_isPlayerListenerAttached) {
+        _audioPlayerService.addListener(onPlayerStateChanged);
+        _isPlayerListenerAttached = true;
+      }
+
+      // Attach listener for sleep timer state changes
+      if (!_isSleepTimerListenerAttached) {
+        _sleepTimerService.addListener(onSleepTimerChanged);
+        _isSleepTimerListenerAttached = true;
+      }
+
+      // Initial state publish
+      onPlayerStateChanged(force: true);
+      onSleepTimerChanged(force: true);
+
+      if (enableDiscovery) {
+        publishDiscovery();
+      }
+
+      _setConnectionStatus(MqttConnectionStatus.connected);
+      return true;
+    } catch (e) {
+      debugPrint('[MqttRemoteService] connect error: $e');
+      _setConnectionStatus(MqttConnectionStatus.error);
       return false;
     }
-
-    // Publish online status retained
-    _clientAdapter.publish(statusTopic, 'online', retain: true);
-
-    // Subscribe to command and control topics
-    _clientAdapter.subscribe(commandTopic);
-    _clientAdapter.subscribe(seekTopic);
-    _clientAdapter.subscribe(volumeTopic);
-    _clientAdapter.subscribe(sleepTimerSetTopic);
-    _clientAdapter.subscribe(playMediaTopic);
-
-    // Listen to inbound commands
-    await _incomingSub?.cancel();
-    _incomingSub = _clientAdapter.incomingMessages.listen((msg) {
-      _handleInboundMessage(msg.topic, msg.payload);
-    });
-
-    // Attach listener for playback state changes
-    if (!_isPlayerListenerAttached) {
-      _audioPlayerService.addListener(onPlayerStateChanged);
-      _isPlayerListenerAttached = true;
-    }
-
-    // Attach listener for sleep timer state changes
-    if (!_isSleepTimerListenerAttached) {
-      _sleepTimerService.addListener(onSleepTimerChanged);
-      _isSleepTimerListenerAttached = true;
-    }
-
-    // Initial state publish
-    onPlayerStateChanged(force: true);
-    onSleepTimerChanged(force: true);
-
-    if (enableDiscovery) {
-      publishDiscovery();
-    }
-
-    return true;
   }
 
   Map<String, dynamic> buildDeviceMetadata() {
@@ -758,9 +813,14 @@ class MqttRemoteService {
     _clientAdapter.disconnect();
     _lastSnapshot = null;
     _lastSleepSnapshot = null;
+    _setConnectionStatus(MqttConnectionStatus.disconnected);
   }
 
+  @override
   void dispose() {
     disconnect();
+    if (this != _instance) {
+      super.dispose();
+    }
   }
 }
