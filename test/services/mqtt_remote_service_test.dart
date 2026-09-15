@@ -32,14 +32,9 @@ class FakeMqttClientAdapter implements MqttClientAdapter {
   final List<PublishedMqttMessage> publishedMessages = [];
   final StreamController<({String topic, String payload})> _incomingController =
       StreamController<({String topic, String payload})>.broadcast();
-  final StreamController<void> _disconnectController =
-      StreamController<void>.broadcast();
 
   @override
   void Function()? onDisconnected;
-
-  @override
-  Stream<void> get onDisconnectedStream => _disconnectController.stream;
 
   @override
   Stream<({String topic, String payload})> get incomingMessages =>
@@ -83,14 +78,10 @@ class FakeMqttClientAdapter implements MqttClientAdapter {
   void simulateDisconnect() {
     _isConnected = false;
     onDisconnected?.call();
-    if (!_disconnectController.isClosed) {
-      _disconnectController.add(null);
-    }
   }
 
   void dispose() {
     _incomingController.close();
-    _disconnectController.close();
   }
 }
 
@@ -1141,23 +1132,14 @@ void main() {
       fakeMqttClient.dispose();
     });
 
-    test('MqttClientAdapter exposes disconnect callback and stream', () async {
+    test('MqttClientAdapter exposes disconnect callback and hooks onDisconnected', () {
       bool callbackFired = false;
-      bool streamFired = false;
-
       fakeMqttClient.onDisconnected = () {
         callbackFired = true;
       };
-      final sub = fakeMqttClient.onDisconnectedStream.listen((_) {
-        streamFired = true;
-      });
 
       fakeMqttClient.simulateDisconnect();
-      await Future<void>.delayed(Duration.zero);
-
       expect(callbackFired, isTrue);
-      expect(streamFired, isTrue);
-      sub.cancel();
     });
 
     test('unexpected disconnect transitions connection status to disconnected', () async {

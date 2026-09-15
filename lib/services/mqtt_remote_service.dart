@@ -58,7 +58,6 @@ abstract class MqttClientAdapter {
   void publish(String topic, String payload, {bool retain = false});
   Stream<({String topic, String payload})> get incomingMessages;
   void Function()? onDisconnected;
-  Stream<void> get onDisconnectedStream;
   bool get isConnected;
 }
 
@@ -66,15 +65,10 @@ class DefaultMqttClientAdapter implements MqttClientAdapter {
   MqttServerClient? _client;
   final StreamController<({String topic, String payload})> _incomingController =
       StreamController<({String topic, String payload})>.broadcast();
-  final StreamController<void> _disconnectController =
-      StreamController<void>.broadcast();
   StreamSubscription? _updateSub;
 
   @override
   void Function()? onDisconnected;
-
-  @override
-  Stream<void> get onDisconnectedStream => _disconnectController.stream;
 
   @override
   Stream<({String topic, String payload})> get incomingMessages =>
@@ -83,13 +77,6 @@ class DefaultMqttClientAdapter implements MqttClientAdapter {
   @override
   bool get isConnected =>
       _client?.connectionStatus?.state == MqttConnectionState.connected;
-
-  void _notifyDisconnected() {
-    onDisconnected?.call();
-    if (!_disconnectController.isClosed) {
-      _disconnectController.add(null);
-    }
-  }
 
   @override
   Future<bool> connect(MqttConnectionConfig config) async {
@@ -125,7 +112,9 @@ class DefaultMqttClientAdapter implements MqttClientAdapter {
       final status = await client.connect(config.username, config.password);
       if (status?.state == MqttConnectionState.connected) {
         _client = client;
-        client.onDisconnected = _notifyDisconnected;
+        client.onDisconnected = () {
+          onDisconnected?.call();
+        };
         _updateSub = client.updates?.listen((messages) {
           for (final msg in messages) {
             final recMess = msg.payload as MqttPublishMessage;
@@ -176,7 +165,6 @@ class DefaultMqttClientAdapter implements MqttClientAdapter {
   void dispose() {
     disconnect();
     _incomingController.close();
-    _disconnectController.close();
   }
 }
 
@@ -283,6 +271,7 @@ class MqttRemoteService extends ChangeNotifier {
     return sanitized.isEmpty ? 'absorb' : sanitized.toLowerCase();
   }
 
+  @visibleForTesting
   Duration computeReconnectDelay(int attempt) {
     final int baseSeconds;
     if (attempt <= 0) {
@@ -299,7 +288,7 @@ class MqttRemoteService extends ChangeNotifier {
     // Jitter: +/- 15% of base delay
     final jitterRange = (baseMs * 0.15).round();
     final randomOffset = (_random.nextDouble() * 2 - 1) * jitterRange;
-    final totalMs = (baseMs + randomOffset).round().clamp(1000, 60000);
+    final totalMs = (baseMs + randomOffset).round().clamp(1000, 70000);
     return Duration(milliseconds: totalMs);
   }
 
@@ -308,12 +297,7 @@ class MqttRemoteService extends ChangeNotifier {
     _reconnectTimer = null;
   }
 
-  void _handleUnexpectedDisconnect() {
-    if (_isExplicitlyDisconnected ||
-        _connectionStatus == MqttConnectionStatus.disconnected) {
-      return;
-    }
-    debugPrint('[MqttRemoteService] Socket disconnected unexpectedly');
+  void _teardownSession() {
     _stopHeartbeat();
     _incomingSub?.cancel();
     _incomingSub = null;
@@ -328,6 +312,15 @@ class MqttRemoteService extends ChangeNotifier {
     _lastSnapshot = null;
     _lastSleepSnapshot = null;
     _setConnectionStatus(MqttConnectionStatus.disconnected);
+  }
+
+  void _handleUnexpectedDisconnect() {
+    if (_isExplicitlyDisconnected ||
+        _connectionStatus == MqttConnectionStatus.disconnected) {
+      return;
+    }
+    debugPrint('[MqttRemoteService] Socket disconnected unexpectedly');
+    _teardownSession();
     _scheduleReconnect();
   }
 
@@ -930,21 +923,8 @@ class MqttRemoteService extends ChangeNotifier {
     if (_clientAdapter.isConnected) {
       _clientAdapter.publish(statusTopic, 'offline', retain: true);
     }
-    _stopHeartbeat();
-    _incomingSub?.cancel();
-    _incomingSub = null;
-    if (_isPlayerListenerAttached) {
-      _audioPlayerService.removeListener(onPlayerStateChanged);
-      _isPlayerListenerAttached = false;
-    }
-    if (_isSleepTimerListenerAttached) {
-      _sleepTimerService.removeListener(onSleepTimerChanged);
-      _isSleepTimerListenerAttached = false;
-    }
+    _teardownSession();
     _clientAdapter.disconnect();
-    _lastSnapshot = null;
-    _lastSleepSnapshot = null;
-    _setConnectionStatus(MqttConnectionStatus.disconnected);
   }
 
   @override
