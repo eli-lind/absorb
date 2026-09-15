@@ -205,6 +205,13 @@ class MqttRemoteService extends ChangeNotifier {
     '60m',
     'end_of_chapter',
   ];
+  static const List<String> speedOptions = [
+    '0.75x',
+    '1.0x',
+    '1.25x',
+    '1.5x',
+    '2.0x',
+  ];
 
   static final MqttRemoteService _instance = MqttRemoteService._();
   factory MqttRemoteService() => _instance;
@@ -371,6 +378,9 @@ class MqttRemoteService extends ChangeNotifier {
       'homeassistant/number/absorb_${_slug}_sleep_timer/config';
   String get discoverySleepTimerPresetSelectTopic =>
       'homeassistant/select/absorb_${_slug}_sleep_timer_preset/config';
+  String get speedSelectSetTopic => 'absorb/$_slug/speed/select/set';
+  String get discoverySpeedSelectTopic =>
+      'homeassistant/select/absorb_${_slug}_speed/config';
 
   static String sanitizeSlug(String rawSlug) {
     final sanitized = rawSlug.trim().replaceAll(RegExp(r'[^a-zA-Z0-9_-]'), '_');
@@ -543,6 +553,7 @@ class MqttRemoteService extends ChangeNotifier {
       _clientAdapter.subscribe(sleepTimerSetTopic);
       _clientAdapter.subscribe(sleepTimerDurationSetTopic);
       _clientAdapter.subscribe(sleepTimerPresetSetTopic);
+      _clientAdapter.subscribe(speedSelectSetTopic);
       _clientAdapter.subscribe(playMediaTopic);
 
       // Listen to inbound commands
@@ -695,12 +706,27 @@ class MqttRemoteService extends ChangeNotifier {
     };
   }
 
+  Map<String, dynamic> buildSpeedSelectDiscoveryPayload() {
+    return {
+      'name': 'Absorb ($_slug) Playback Speed',
+      'unique_id': 'absorb_${_slug}_speed',
+      'command_topic': speedSelectSetTopic,
+      'options': speedOptions,
+      'icon': 'mdi:play-speed',
+      'availability_topic': statusTopic,
+      'payload_available': 'online',
+      'payload_not_available': 'offline',
+      'device': buildDeviceMetadata(),
+    };
+  }
+
   List<String> get allDiscoveryTopics => [
         discoveryMediaPlayerTopic,
         discoverySleepTimerSensorTopic,
         discoverySleepChapterButtonTopic,
         discoverySleepTimerNumberTopic,
         discoverySleepTimerPresetSelectTopic,
+        discoverySpeedSelectTopic,
       ];
 
   void publishDiscovery() {
@@ -727,6 +753,11 @@ class MqttRemoteService extends ChangeNotifier {
     _clientAdapter.publish(
       discoverySleepTimerPresetSelectTopic,
       jsonEncode(buildSleepTimerPresetSelectDiscoveryPayload()),
+      retain: true,
+    );
+    _clientAdapter.publish(
+      discoverySpeedSelectTopic,
+      jsonEncode(buildSpeedSelectDiscoveryPayload()),
       retain: true,
     );
   }
@@ -795,6 +826,8 @@ class MqttRemoteService extends ChangeNotifier {
       _handleSleepTimerDurationCommand(payload);
     } else if (topic == sleepTimerPresetSetTopic) {
       _handleSleepTimerPresetCommand(payload);
+    } else if (topic == speedSelectSetTopic) {
+      await _handleSpeedSelectCommand(payload);
     } else if (topic == playMediaTopic) {
       await _handlePlayMediaCommand(payload);
     }
@@ -1029,6 +1062,16 @@ class MqttRemoteService extends ChangeNotifier {
         _sleepTimerService.setTimeSleep(const Duration(minutes: 60));
       case 'end_of_chapter':
         _sleepTimerService.setChapterSleep(1);
+    }
+  }
+
+  Future<void> _handleSpeedSelectCommand(String rawPayload) async {
+    final trimmed = rawPayload.trim().toLowerCase();
+    final parsed = double.tryParse(trimmed.replaceAll('x', ''));
+    if (parsed != null) {
+      final clamped = parsed.clamp(minSpeed, maxSpeed);
+      await _audioPlayerService.setSpeed(clamped);
+      _publishState();
     }
   }
 
