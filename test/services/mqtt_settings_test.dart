@@ -38,6 +38,9 @@ class FakeMqttClientAdapter implements MqttClientAdapter {
   }
 
   @override
+  void Function()? onDisconnected;
+
+  @override
   void subscribe(String topic) {}
 
   @override

@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math' as math;
 import 'package:fake_async/fake_async.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -10,6 +11,7 @@ import 'package:absorb/services/audio_player_service.dart';
 import 'package:absorb/services/sleep_timer_service.dart';
 import 'package:absorb/services/api_service.dart';
 import 'package:absorb/services/download_service.dart';
+import 'package:absorb/services/mqtt_settings.dart';
 
 
 
@@ -24,11 +26,15 @@ class MockDownloadService extends Mock implements DownloadService {}
 class FakeMqttClientAdapter implements MqttClientAdapter {
   MqttConnectionConfig? lastConfig;
   bool _isConnected = false;
+  bool shouldSucceed = true;
 
   final List<String> subscriptions = [];
   final List<PublishedMqttMessage> publishedMessages = [];
   final StreamController<({String topic, String payload})> _incomingController =
       StreamController<({String topic, String payload})>.broadcast();
+
+  @override
+  void Function()? onDisconnected;
 
   @override
   Stream<({String topic, String payload})> get incomingMessages =>
@@ -40,6 +46,10 @@ class FakeMqttClientAdapter implements MqttClientAdapter {
   @override
   Future<bool> connect(MqttConnectionConfig config) async {
     lastConfig = config;
+    if (!shouldSucceed) {
+      _isConnected = false;
+      return false;
+    }
     _isConnected = true;
     return true;
   }
@@ -63,6 +73,11 @@ class FakeMqttClientAdapter implements MqttClientAdapter {
 
   void simulateInboundMessage(String topic, String payload) {
     _incomingController.add((topic: topic, payload: payload));
+  }
+
+  void simulateDisconnect() {
+    _isConnected = false;
+    onDisconnected?.call();
   }
 
   void dispose() {
@@ -1075,6 +1090,220 @@ void main() {
           .map((m) => m.topic)
           .where((t) => t.startsWith('homeassistant/'));
       expect(discoveryTopics, isEmpty);
+    });
+  });
+
+  group('MqttRemoteService Ticket #18: Disconnect Detection & Exponential Backoff Reconnect Loop', () {
+    late MockAudioPlayerService mockAudioPlayerService;
+    late FakeMqttClientAdapter fakeMqttClient;
+    late MqttRemoteService service;
+
+    setUp(() {
+      SharedPreferences.setMockInitialValues({
+        'mqtt_enabled': true,
+        'mqtt_host': '192.168.1.50',
+        'mqtt_port': 1883,
+        'mqtt_slug': 'kids_tablet',
+      });
+      mockAudioPlayerService = MockAudioPlayerService();
+      fakeMqttClient = FakeMqttClientAdapter();
+
+      when(() => mockAudioPlayerService.isPlaying).thenReturn(false);
+      when(() => mockAudioPlayerService.nowPlayingTitle).thenReturn('');
+      when(() => mockAudioPlayerService.currentTitle).thenReturn('');
+      when(() => mockAudioPlayerService.currentAuthor).thenReturn('');
+      when(() => mockAudioPlayerService.currentCoverUrl).thenReturn(null);
+      when(() => mockAudioPlayerService.totalDuration).thenReturn(0.0);
+      when(() => mockAudioPlayerService.position).thenReturn(Duration.zero);
+      when(() => mockAudioPlayerService.volume).thenReturn(1.0);
+      when(() => mockAudioPlayerService.speed).thenReturn(1.0);
+      when(() => mockAudioPlayerService.chapters).thenReturn([]);
+      when(() => mockAudioPlayerService.currentChapter).thenReturn(null);
+
+      service = MqttRemoteService.forTesting(
+        audioPlayerService: mockAudioPlayerService,
+        clientAdapter: fakeMqttClient,
+        enableJitter: false,
+      );
+    });
+
+    tearDown(() {
+      service.dispose();
+      fakeMqttClient.dispose();
+    });
+
+    test('MqttClientAdapter exposes disconnect callback and hooks onDisconnected', () {
+      bool callbackFired = false;
+      fakeMqttClient.onDisconnected = () {
+        callbackFired = true;
+      };
+
+      fakeMqttClient.simulateDisconnect();
+      expect(callbackFired, isTrue);
+    });
+
+    test('unexpected disconnect transitions connection status to disconnected', () async {
+      await service.connect(
+        host: '192.168.1.50',
+        slug: 'kids_tablet',
+      );
+      expect(service.connectionStatus, equals(MqttConnectionStatus.connected));
+
+      fakeMqttClient.simulateDisconnect();
+      expect(service.connectionStatus, equals(MqttConnectionStatus.disconnected));
+    });
+
+    test('reconnect loop executes exponential backoff (2s, 4s, 8s, 16s, 32s, 60s max) when enableJitter is false', () {
+      fakeAsync((async) {
+        service.connect(
+          host: '192.168.1.50',
+          slug: 'kids_tablet',
+        );
+        async.flushMicrotasks();
+        expect(service.connectionStatus, equals(MqttConnectionStatus.connected));
+
+        // Trigger unexpected disconnect
+        fakeMqttClient.simulateDisconnect();
+        async.flushMicrotasks();
+
+        expect(service.connectionStatus, equals(MqttConnectionStatus.disconnected));
+        expect(service.isReconnecting, isTrue);
+        expect(service.reconnectAttempts, equals(0));
+
+        expect(service.computeReconnectDelay(0), equals(const Duration(seconds: 2)));
+        expect(service.computeReconnectDelay(1), equals(const Duration(seconds: 4)));
+        expect(service.computeReconnectDelay(2), equals(const Duration(seconds: 8)));
+        expect(service.computeReconnectDelay(3), equals(const Duration(seconds: 16)));
+        expect(service.computeReconnectDelay(4), equals(const Duration(seconds: 32)));
+        expect(service.computeReconnectDelay(5), equals(const Duration(seconds: 60)));
+        expect(service.computeReconnectDelay(6), equals(const Duration(seconds: 60)));
+
+        // Advance 1s: still waiting on retry timer
+        async.elapse(const Duration(seconds: 1));
+        expect(service.isReconnecting, isTrue);
+
+        // Advance 1 more second (2s total): 1st reconnect attempt fires
+        async.elapse(const Duration(seconds: 1));
+        async.flushMicrotasks();
+
+        // Successful reconnect restores connected state and resets retry counters
+        expect(service.connectionStatus, equals(MqttConnectionStatus.connected));
+        expect(service.isReconnecting, isFalse);
+        expect(service.reconnectAttempts, equals(0));
+      });
+    });
+
+    test('reconnect loop increments attempts and schedules next backoff if reconnect fails', () {
+      fakeAsync((async) {
+        service.connect(
+          host: '192.168.1.50',
+          slug: 'kids_tablet',
+        );
+        async.flushMicrotasks();
+
+        // Simulate unexpected disconnect
+        fakeMqttClient.simulateDisconnect();
+        async.flushMicrotasks();
+        expect(service.reconnectAttempts, equals(0));
+
+        // Make subsequent connection attempts fail
+        fakeMqttClient.shouldSucceed = false;
+
+        // 1st attempt at 2s: fails
+        async.elapse(const Duration(seconds: 2));
+        async.flushMicrotasks();
+        expect(service.connectionStatus, equals(MqttConnectionStatus.error));
+        expect(service.reconnectAttempts, equals(1));
+        expect(service.isReconnecting, isTrue);
+
+        // Advance 3s (not reached 4s backoff yet)
+        async.elapse(const Duration(seconds: 3));
+        expect(service.reconnectAttempts, equals(1));
+
+        // Advance 1 more second (4s backoff reached): 2nd attempt fails
+        async.elapse(const Duration(seconds: 1));
+        async.flushMicrotasks();
+        expect(service.reconnectAttempts, equals(2));
+        expect(service.isReconnecting, isTrue);
+
+        // Advance 8s backoff: 3rd attempt succeeds when shouldSucceed restored
+        fakeMqttClient.shouldSucceed = true;
+        async.elapse(const Duration(seconds: 8));
+        async.flushMicrotasks();
+
+        expect(service.connectionStatus, equals(MqttConnectionStatus.connected));
+        expect(service.reconnectAttempts, equals(0));
+        expect(service.isReconnecting, isFalse);
+      });
+    });
+
+    test('jitter is applied within +/- 15% when enableJitter is true', () {
+      final jitterService = MqttRemoteService.forTesting(
+        audioPlayerService: mockAudioPlayerService,
+        clientAdapter: fakeMqttClient,
+        enableJitter: true,
+        random: math.Random(42),
+      );
+
+      final d0 = jitterService.computeReconnectDelay(0);
+      expect(d0.inMilliseconds, inInclusiveRange(1700, 2300));
+
+      final d1 = jitterService.computeReconnectDelay(1);
+      expect(d1.inMilliseconds, inInclusiveRange(3400, 4600));
+
+      final d2 = jitterService.computeReconnectDelay(2);
+      expect(d2.inMilliseconds, inInclusiveRange(6800, 9200));
+
+      final d5 = jitterService.computeReconnectDelay(5);
+      expect(d5.inMilliseconds, inInclusiveRange(51000, 60000));
+    });
+
+    test('explicit disconnect cancels active reconnection timer and resets retry backoff', () {
+      fakeAsync((async) {
+        service.connect(
+          host: '192.168.1.50',
+          slug: 'kids_tablet',
+        );
+        async.flushMicrotasks();
+
+        fakeMqttClient.simulateDisconnect();
+        async.flushMicrotasks();
+        expect(service.isReconnecting, isTrue);
+
+        // Explicit disconnect
+        service.disconnect();
+        expect(service.isReconnecting, isFalse);
+        expect(service.reconnectAttempts, equals(0));
+
+        // Advance 10s: no reconnection fires
+        async.elapse(const Duration(seconds: 10));
+        expect(service.connectionStatus, equals(MqttConnectionStatus.disconnected));
+        expect(service.isReconnecting, isFalse);
+      });
+    });
+
+    test('disabling MQTT cancels active reconnection timer when timer fires', () {
+      fakeAsync((async) {
+        service.connect(
+          host: '192.168.1.50',
+          slug: 'kids_tablet',
+        );
+        async.flushMicrotasks();
+
+        fakeMqttClient.simulateDisconnect();
+        async.flushMicrotasks();
+        expect(service.isReconnecting, isTrue);
+
+        // Disable MQTT in settings
+        MqttSettings.setEnabled(false);
+
+        // Advance 2s: timer fires, discovers disabled, disconnects cleanly
+        async.elapse(const Duration(seconds: 2));
+        async.flushMicrotasks();
+
+        expect(service.isReconnecting, isFalse);
+        expect(service.connectionStatus, equals(MqttConnectionStatus.disconnected));
+      });
     });
   });
 }

@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math' as math;
 import 'package:flutter/foundation.dart';
 import 'package:mqtt_client/mqtt_client.dart';
 import 'package:mqtt_client/mqtt_server_client.dart';
@@ -56,6 +57,7 @@ abstract class MqttClientAdapter {
   void subscribe(String topic);
   void publish(String topic, String payload, {bool retain = false});
   Stream<({String topic, String payload})> get incomingMessages;
+  void Function()? onDisconnected;
   bool get isConnected;
 }
 
@@ -64,6 +66,9 @@ class DefaultMqttClientAdapter implements MqttClientAdapter {
   final StreamController<({String topic, String payload})> _incomingController =
       StreamController<({String topic, String payload})>.broadcast();
   StreamSubscription? _updateSub;
+
+  @override
+  void Function()? onDisconnected;
 
   @override
   Stream<({String topic, String payload})> get incomingMessages =>
@@ -107,6 +112,9 @@ class DefaultMqttClientAdapter implements MqttClientAdapter {
       final status = await client.connect(config.username, config.password);
       if (status?.state == MqttConnectionState.connected) {
         _client = client;
+        client.onDisconnected = () {
+          onDisconnected?.call();
+        };
         _updateSub = client.updates?.listen((messages) {
           for (final msg in messages) {
             final recMess = msg.payload as MqttPublishMessage;
@@ -118,6 +126,7 @@ class DefaultMqttClientAdapter implements MqttClientAdapter {
       }
     } catch (e) {
       debugPrint('[MqttRemoteService] Connection error: $e');
+      client.onDisconnected = null;
       client.disconnect();
     }
     return false;
@@ -126,8 +135,11 @@ class DefaultMqttClientAdapter implements MqttClientAdapter {
   @override
   void disconnect() {
     _updateSub?.cancel();
-    _client?.disconnect();
-    _client = null;
+    if (_client != null) {
+      _client!.onDisconnected = null;
+      _client!.disconnect();
+      _client = null;
+    }
   }
 
   @override
@@ -148,6 +160,11 @@ class DefaultMqttClientAdapter implements MqttClientAdapter {
         retain: retain,
       );
     }
+  }
+
+  void dispose() {
+    disconnect();
+    _incomingController.close();
   }
 }
 
@@ -181,7 +198,11 @@ class MqttRemoteService extends ChangeNotifier {
         _sleepTimerService = SleepTimerService(),
         _downloadService = DownloadService(),
         _apiProvider = null,
-        _clientAdapter = DefaultMqttClientAdapter();
+        _clientAdapter = DefaultMqttClientAdapter(),
+        _random = math.Random(),
+        _enableJitter = true {
+    _clientAdapter.onDisconnected = _handleUnexpectedDisconnect;
+  }
 
   @visibleForTesting
   MqttRemoteService.forTesting({
@@ -190,17 +211,25 @@ class MqttRemoteService extends ChangeNotifier {
     DownloadService? downloadService,
     ApiService? Function()? apiProvider,
     required MqttClientAdapter clientAdapter,
+    math.Random? random,
+    bool enableJitter = true,
   })  : _audioPlayerService = audioPlayerService,
         _sleepTimerService = sleepTimerService ?? SleepTimerService(),
         _downloadService = downloadService ?? DownloadService(),
         _apiProvider = apiProvider,
-        _clientAdapter = clientAdapter;
+        _clientAdapter = clientAdapter,
+        _random = random ?? math.Random(0),
+        _enableJitter = enableJitter {
+    _clientAdapter.onDisconnected = _handleUnexpectedDisconnect;
+  }
 
   final AudioPlayerService _audioPlayerService;
   final SleepTimerService _sleepTimerService;
   final DownloadService _downloadService;
   final ApiService? Function()? _apiProvider;
   final MqttClientAdapter _clientAdapter;
+  final math.Random _random;
+  final bool _enableJitter;
 
   MqttConnectionStatus _connectionStatus = MqttConnectionStatus.disconnected;
   MqttConnectionStatus get connectionStatus => _connectionStatus;
@@ -208,12 +237,19 @@ class MqttRemoteService extends ChangeNotifier {
   String _slug = 'absorb';
   StreamSubscription? _incomingSub;
   Timer? _heartbeatTimer;
+  Timer? _reconnectTimer;
+  int _reconnectAttempts = 0;
+  bool _isExplicitlyDisconnected = false;
   bool _isPlayerListenerAttached = false;
   bool _isSleepTimerListenerAttached = false;
   _PlayerSnapshot? _lastSnapshot;
   _SleepTimerSnapshot? _lastSleepSnapshot;
 
   bool get isConnected => _clientAdapter.isConnected;
+  bool get isReconnecting =>
+      _reconnectTimer != null && _reconnectTimer!.isActive;
+  int get reconnectAttempts => _reconnectAttempts;
+  Timer? get reconnectTimer => _reconnectTimer;
   String get slug => _slug;
   String get statusTopic => 'absorb/$_slug/status';
   String get commandTopic => 'absorb/$_slug/set';
@@ -233,6 +269,88 @@ class MqttRemoteService extends ChangeNotifier {
   static String sanitizeSlug(String rawSlug) {
     final sanitized = rawSlug.trim().replaceAll(RegExp(r'[^a-zA-Z0-9_-]'), '_');
     return sanitized.isEmpty ? 'absorb' : sanitized.toLowerCase();
+  }
+
+  @visibleForTesting
+  Duration computeReconnectDelay(int attempt) {
+    final int baseSeconds;
+    if (attempt <= 0) {
+      baseSeconds = 2;
+    } else if (attempt >= 5) {
+      baseSeconds = 60;
+    } else {
+      baseSeconds = (2 * (1 << attempt)).clamp(2, 60);
+    }
+    final baseMs = baseSeconds * 1000;
+    if (!_enableJitter) {
+      return Duration(milliseconds: baseMs);
+    }
+    // Jitter: +/- 15% of base delay
+    final jitterRange = (baseMs * 0.15).round();
+    final randomOffset = (_random.nextDouble() * 2 - 1) * jitterRange;
+    final totalMs = (baseMs + randomOffset).round().clamp(1000, 70000);
+    return Duration(milliseconds: totalMs);
+  }
+
+  void _cancelReconnectTimer() {
+    _reconnectTimer?.cancel();
+    _reconnectTimer = null;
+  }
+
+  void _teardownSession() {
+    _stopHeartbeat();
+    _incomingSub?.cancel();
+    _incomingSub = null;
+    if (_isPlayerListenerAttached) {
+      _audioPlayerService.removeListener(onPlayerStateChanged);
+      _isPlayerListenerAttached = false;
+    }
+    if (_isSleepTimerListenerAttached) {
+      _sleepTimerService.removeListener(onSleepTimerChanged);
+      _isSleepTimerListenerAttached = false;
+    }
+    _lastSnapshot = null;
+    _lastSleepSnapshot = null;
+    _setConnectionStatus(MqttConnectionStatus.disconnected);
+  }
+
+  void _handleUnexpectedDisconnect() {
+    if (_isExplicitlyDisconnected ||
+        _connectionStatus == MqttConnectionStatus.disconnected) {
+      return;
+    }
+    debugPrint('[MqttRemoteService] Socket disconnected unexpectedly');
+    _teardownSession();
+    _scheduleReconnect();
+  }
+
+  void _scheduleReconnect() {
+    _cancelReconnectTimer();
+    final delay = computeReconnectDelay(_reconnectAttempts);
+    debugPrint(
+      '[MqttRemoteService] Scheduling reconnect attempt $_reconnectAttempts in ${delay.inMilliseconds}ms',
+    );
+    _reconnectTimer = Timer(delay, () async {
+      _reconnectTimer = null;
+      if (_isExplicitlyDisconnected) return;
+
+      final enabled = await MqttSettings.isEnabled();
+      if (!enabled) {
+        disconnect();
+        return;
+      }
+      final success = await connectFromSettings();
+      if (success) {
+        _reconnectAttempts = 0;
+      } else {
+        _reconnectAttempts++;
+        if (!_isExplicitlyDisconnected &&
+            (_connectionStatus == MqttConnectionStatus.disconnected ||
+                _connectionStatus == MqttConnectionStatus.error)) {
+          _scheduleReconnect();
+        }
+      }
+    });
   }
 
   void _setConnectionStatus(MqttConnectionStatus status) {
@@ -279,6 +397,8 @@ class MqttRemoteService extends ChangeNotifier {
     bool useTls = false,
     bool enableDiscovery = true,
   }) async {
+    _cancelReconnectTimer();
+    _isExplicitlyDisconnected = false;
     _setConnectionStatus(MqttConnectionStatus.connecting);
     _slug = sanitizeSlug(slug);
     final resolvedPort = port ?? (useTls ? 8883 : 1883);
@@ -341,6 +461,7 @@ class MqttRemoteService extends ChangeNotifier {
         publishDiscovery();
       }
 
+      _reconnectAttempts = 0;
       _setConnectionStatus(MqttConnectionStatus.connected);
       return true;
     } catch (e) {
@@ -796,24 +917,14 @@ class MqttRemoteService extends ChangeNotifier {
   }
 
   void disconnect() {
+    _isExplicitlyDisconnected = true;
+    _cancelReconnectTimer();
+    _reconnectAttempts = 0;
     if (_clientAdapter.isConnected) {
       _clientAdapter.publish(statusTopic, 'offline', retain: true);
     }
-    _stopHeartbeat();
-    _incomingSub?.cancel();
-    _incomingSub = null;
-    if (_isPlayerListenerAttached) {
-      _audioPlayerService.removeListener(onPlayerStateChanged);
-      _isPlayerListenerAttached = false;
-    }
-    if (_isSleepTimerListenerAttached) {
-      _sleepTimerService.removeListener(onSleepTimerChanged);
-      _isSleepTimerListenerAttached = false;
-    }
+    _teardownSession();
     _clientAdapter.disconnect();
-    _lastSnapshot = null;
-    _lastSleepSnapshot = null;
-    _setConnectionStatus(MqttConnectionStatus.disconnected);
   }
 
   @override
