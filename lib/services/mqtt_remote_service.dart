@@ -879,17 +879,15 @@ class MqttRemoteService extends ChangeNotifier {
         if (decoded is Map<String, dynamic>) {
           if (decoded['cancel'] == true) {
             _sleepTimerService.cancel();
-            return;
           } else if (decoded['mode'] == 'end_of_chapter' || decoded['mode'] == 'chapter') {
             _sleepTimerService.setChapterSleep(1);
-            return;
           } else if (decoded['duration_minutes'] is num) {
-            final minutes = (decoded['duration_minutes'] as num).toInt();
-            if (minutes > 0) {
-              _sleepTimerService.setTimeSleep(Duration(minutes: minutes));
+            final durationVal = decoded['duration_minutes'] as num;
+            if (durationVal.isFinite && durationVal.toInt() > 0) {
+              _sleepTimerService.setTimeSleep(Duration(minutes: durationVal.toInt()));
             }
-            return;
           }
+          return;
         }
       } catch (_) {
         // Fall through to non-JSON parsing
@@ -897,11 +895,8 @@ class MqttRemoteService extends ChangeNotifier {
     }
 
     var unquoted = trimmed;
-    if ((unquoted.startsWith('"') && unquoted.endsWith('"')) ||
-        (unquoted.startsWith("'") && unquoted.endsWith("'"))) {
-      if (unquoted.length >= 2) {
-        unquoted = unquoted.substring(1, unquoted.length - 1).trim();
-      }
+    if (unquoted.startsWith('"') && unquoted.endsWith('"') && unquoted.length >= 2) {
+      unquoted = unquoted.substring(1, unquoted.length - 1).trim();
     }
 
     final lower = unquoted.toLowerCase();
@@ -915,12 +910,9 @@ class MqttRemoteService extends ChangeNotifier {
       return;
     }
 
-    final numeric = num.tryParse(unquoted);
-    if (numeric != null) {
-      final minutes = numeric.toInt();
-      if (minutes > 0) {
-        _sleepTimerService.setTimeSleep(Duration(minutes: minutes));
-      }
+    final minutes = int.tryParse(unquoted);
+    if (minutes != null && minutes > 0) {
+      _sleepTimerService.setTimeSleep(Duration(minutes: minutes));
       return;
     }
   }

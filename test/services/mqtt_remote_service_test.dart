@@ -1864,6 +1864,25 @@ void main() {
       verify(() => mockSleepTimerService.cancel()).called(1);
     });
 
+    test('inbound quoted string commands and numbers are parsed correctly', () async {
+      await service.connect(
+        host: '192.168.1.50',
+        slug: 'kids_tablet',
+      );
+
+      fakeMqttClient.simulateInboundMessage('absorb/kids_tablet/sleep_timer/set', '"cancel"');
+      await Future<void>.delayed(Duration.zero);
+      verify(() => mockSleepTimerService.cancel()).called(1);
+
+      fakeMqttClient.simulateInboundMessage('absorb/kids_tablet/sleep_timer/set', '"end_of_chapter"');
+      await Future<void>.delayed(Duration.zero);
+      verify(() => mockSleepTimerService.setChapterSleep(1)).called(1);
+
+      fakeMqttClient.simulateInboundMessage('absorb/kids_tablet/sleep_timer/set', '"30"');
+      await Future<void>.delayed(Duration.zero);
+      verify(() => mockSleepTimerService.setTimeSleep(const Duration(minutes: 30))).called(1);
+    });
+
     test('gracefully ignores invalid, empty, or non-positive sleep timer payloads', () async {
       await service.connect(
         host: '192.168.1.50',
@@ -1875,7 +1894,9 @@ void main() {
       fakeMqttClient.simulateInboundMessage('absorb/kids_tablet/sleep_timer/set', 'invalid_mode');
       fakeMqttClient.simulateInboundMessage('absorb/kids_tablet/sleep_timer/set', '-10');
       fakeMqttClient.simulateInboundMessage('absorb/kids_tablet/sleep_timer/set', '0');
+      fakeMqttClient.simulateInboundMessage('absorb/kids_tablet/sleep_timer/set', 'Infinity');
       fakeMqttClient.simulateInboundMessage('absorb/kids_tablet/sleep_timer/set', '{malformed json');
+      fakeMqttClient.simulateInboundMessage('absorb/kids_tablet/sleep_timer/set', jsonEncode({'cancel': false}));
       await Future<void>.delayed(Duration.zero);
 
       verifyNever(() => mockSleepTimerService.setTimeSleep(any()));
