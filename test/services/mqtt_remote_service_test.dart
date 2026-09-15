@@ -1665,7 +1665,7 @@ void main() {
       verifyNever(() => mockAudioPlayerService.pause());
     });
 
-    test('state telemetry publish reflects updated speed and playback state', () async {
+    test('state telemetry publish reflects updated speed', () async {
       when(() => mockAudioPlayerService.speed).thenReturn(1.5);
 
       await service.connect(
@@ -1684,6 +1684,28 @@ void main() {
       expect(stateMessages, isNotEmpty);
       final latestState = jsonDecode(stateMessages.last.payload) as Map<String, dynamic>;
       expect(latestState['speed'], equals(1.5));
+    });
+
+    test('state telemetry publish reflects updated playback state on PLAY_PAUSE', () async {
+      when(() => mockAudioPlayerService.isPlaying).thenReturn(false);
+
+      await service.connect(
+        host: '192.168.1.50',
+        slug: 'kids_tablet',
+      );
+
+      when(() => mockAudioPlayerService.isPlaying).thenReturn(true);
+      fakeMqttClient.publishedMessages.clear();
+
+      fakeMqttClient.simulateInboundMessage('absorb/kids_tablet/set', 'PLAY_PAUSE');
+      await Future<void>.delayed(Duration.zero);
+
+      final stateMessages = fakeMqttClient.publishedMessages
+          .where((m) => m.topic == 'absorb/kids_tablet/state')
+          .toList();
+      expect(stateMessages, isNotEmpty);
+      final latestState = jsonDecode(stateMessages.last.payload) as Map<String, dynamic>;
+      expect(latestState['state'], equals('playing'));
     });
   });
 }

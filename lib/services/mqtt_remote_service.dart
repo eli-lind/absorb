@@ -192,6 +192,9 @@ enum MqttConnectionStatus {
 }
 
 class MqttRemoteService extends ChangeNotifier {
+  static const double minSpeed = 0.5;
+  static const double maxSpeed = 3.0;
+
   static final MqttRemoteService _instance = MqttRemoteService._();
   factory MqttRemoteService() => _instance;
   MqttRemoteService._({
@@ -684,6 +687,7 @@ class MqttRemoteService extends ChangeNotifier {
         } else {
           await _audioPlayerService.play(fromUi: false);
         }
+        _publishState();
       }
     } else if (topic == seekTopic) {
       final seconds = num.tryParse(payload.trim())?.toDouble();
@@ -704,7 +708,7 @@ class MqttRemoteService extends ChangeNotifier {
     } else if (topic == speedTopic) {
       final speed = num.tryParse(payload.trim())?.toDouble();
       if (speed != null) {
-        final clampedSpeed = speed.clamp(0.5, 3.0);
+        final clampedSpeed = speed.clamp(minSpeed, maxSpeed);
         await _audioPlayerService.setSpeed(clampedSpeed);
         _publishState();
       }
