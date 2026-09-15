@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:math' as math;
+import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter/foundation.dart';
 import 'package:mqtt_client/mqtt_client.dart';
 import 'package:mqtt_client/mqtt_server_client.dart';
@@ -193,8 +194,9 @@ enum MqttConnectionStatus {
 class MqttRemoteService extends ChangeNotifier {
   static final MqttRemoteService _instance = MqttRemoteService._();
   factory MqttRemoteService() => _instance;
-  MqttRemoteService._()
-      : _audioPlayerService = AudioPlayerService(),
+  MqttRemoteService._({
+    Stream<List<ConnectivityResult>>? connectivityStream,
+  })  : _audioPlayerService = AudioPlayerService(),
         _sleepTimerService = SleepTimerService(),
         _downloadService = DownloadService(),
         _apiProvider = null,
@@ -202,6 +204,9 @@ class MqttRemoteService extends ChangeNotifier {
         _random = math.Random(),
         _enableJitter = true {
     _clientAdapter.onDisconnected = _handleUnexpectedDisconnect;
+    _subscribeConnectivity(
+      connectivityStream ?? Connectivity().onConnectivityChanged,
+    );
   }
 
   @visibleForTesting
@@ -213,6 +218,7 @@ class MqttRemoteService extends ChangeNotifier {
     required MqttClientAdapter clientAdapter,
     math.Random? random,
     bool enableJitter = true,
+    Stream<List<ConnectivityResult>>? connectivityStream,
   })  : _audioPlayerService = audioPlayerService,
         _sleepTimerService = sleepTimerService ?? SleepTimerService(),
         _downloadService = downloadService ?? DownloadService(),
@@ -221,6 +227,9 @@ class MqttRemoteService extends ChangeNotifier {
         _random = random ?? math.Random(0),
         _enableJitter = enableJitter {
     _clientAdapter.onDisconnected = _handleUnexpectedDisconnect;
+    if (connectivityStream != null) {
+      _subscribeConnectivity(connectivityStream);
+    }
   }
 
   final AudioPlayerService _audioPlayerService;
@@ -230,6 +239,80 @@ class MqttRemoteService extends ChangeNotifier {
   final MqttClientAdapter _clientAdapter;
   final math.Random _random;
   final bool _enableJitter;
+
+  StreamSubscription<List<ConnectivityResult>>? _connectivitySub;
+  bool _isNetworkOnline = false;
+
+  @visibleForTesting
+  bool get isNetworkOnline => _isNetworkOnline;
+
+  void _subscribeConnectivity(Stream<List<ConnectivityResult>> stream) {
+    _connectivitySub?.cancel();
+    _connectivitySub = stream.listen((results) {
+      _handleConnectivityChanged(results);
+    });
+  }
+
+  Future<void> _handleConnectivityChanged(
+    List<ConnectivityResult> results,
+  ) async {
+    final isOnline = results.any((r) =>
+        r == ConnectivityResult.wifi ||
+        r == ConnectivityResult.mobile ||
+        r == ConnectivityResult.ethernet ||
+        r == ConnectivityResult.vpn);
+    final wasOffline = !_isNetworkOnline;
+    _isNetworkOnline = isOnline;
+
+    if (isOnline && wasOffline) {
+      await _handleConnectivityRestored();
+    }
+  }
+
+  bool _isDisposed = false;
+
+  @visibleForTesting
+  bool get isDisposed => _isDisposed;
+
+  Future<void> _handleConnectivityRestored() async {
+    if (_isDisposed) return;
+    if (_connectionStatus != MqttConnectionStatus.disconnected &&
+        _connectionStatus != MqttConnectionStatus.error) {
+      return;
+    }
+    final enabled = await MqttSettings.isEnabled();
+    if (!enabled || _isDisposed) {
+      return;
+    }
+    if (_connectionStatus != MqttConnectionStatus.disconnected &&
+        _connectionStatus != MqttConnectionStatus.error) {
+      return;
+    }
+
+    debugPrint(
+      '[MqttRemoteService] Network connectivity restored, triggering immediate reconnect',
+    );
+    _cancelReconnectTimer();
+    _reconnectAttempts = 0;
+    await _attemptReconnect();
+  }
+
+  Future<bool> _attemptReconnect() async {
+    if (_isDisposed) return false;
+    final success = await connectFromSettings();
+    if (_isDisposed) return success;
+    if (success) {
+      _reconnectAttempts = 0;
+    } else {
+      _reconnectAttempts++;
+      if (!_isExplicitlyDisconnected &&
+          (_connectionStatus == MqttConnectionStatus.disconnected ||
+              _connectionStatus == MqttConnectionStatus.error)) {
+        _scheduleReconnect();
+      }
+    }
+    return success;
+  }
 
   MqttConnectionStatus _connectionStatus = MqttConnectionStatus.disconnected;
   MqttConnectionStatus get connectionStatus => _connectionStatus;
@@ -339,34 +422,26 @@ class MqttRemoteService extends ChangeNotifier {
         disconnect();
         return;
       }
-      final success = await connectFromSettings();
-      if (success) {
-        _reconnectAttempts = 0;
-      } else {
-        _reconnectAttempts++;
-        if (!_isExplicitlyDisconnected &&
-            (_connectionStatus == MqttConnectionStatus.disconnected ||
-                _connectionStatus == MqttConnectionStatus.error)) {
-          _scheduleReconnect();
-        }
-      }
+      await _attemptReconnect();
     });
   }
 
   void _setConnectionStatus(MqttConnectionStatus status) {
+    if (_isDisposed) return;
     if (_connectionStatus == status) return;
     _connectionStatus = status;
     notifyListeners();
   }
 
   Future<bool> connectFromSettings() async {
+    if (_isDisposed) return false;
     final enabled = await MqttSettings.isEnabled();
-    if (!enabled) {
+    if (!enabled || _isDisposed) {
       disconnect();
       return false;
     }
     final host = await MqttSettings.getHost();
-    if (host.isEmpty) {
+    if (host.isEmpty || _isDisposed) {
       disconnect();
       return false;
     }
@@ -376,6 +451,8 @@ class MqttRemoteService extends ChangeNotifier {
     final password = await MqttSettings.getPassword();
     final discovery = await MqttSettings.isDiscoveryEnabled();
     final tls = await MqttSettings.useTls();
+
+    if (_isDisposed) return false;
 
     return connect(
       host: host,
@@ -397,6 +474,7 @@ class MqttRemoteService extends ChangeNotifier {
     bool useTls = false,
     bool enableDiscovery = true,
   }) async {
+    if (_isDisposed) return false;
     _cancelReconnectTimer();
     _isExplicitlyDisconnected = false;
     _setConnectionStatus(MqttConnectionStatus.connecting);
@@ -420,6 +498,12 @@ class MqttRemoteService extends ChangeNotifier {
 
     try {
       final success = await _clientAdapter.connect(config);
+      if (_isDisposed || _isExplicitlyDisconnected) {
+        if (success) {
+          _clientAdapter.disconnect();
+        }
+        return false;
+      }
       if (!success) {
         _setConnectionStatus(MqttConnectionStatus.error);
         return false;
@@ -929,7 +1013,11 @@ class MqttRemoteService extends ChangeNotifier {
 
   @override
   void dispose() {
+    if (_isDisposed) return;
     disconnect();
+    _isDisposed = true;
+    _connectivitySub?.cancel();
+    _connectivitySub = null;
     if (this != _instance) {
       super.dispose();
     }

@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:math' as math;
+import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:fake_async/fake_async.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -1304,6 +1305,229 @@ void main() {
         expect(service.isReconnecting, isFalse);
         expect(service.connectionStatus, equals(MqttConnectionStatus.disconnected));
       });
+    });
+  });
+
+  group('MqttRemoteService Ticket #19: Network Recovery & Proactive Reconnect', () {
+    late MockAudioPlayerService mockAudioPlayerService;
+    late FakeMqttClientAdapter fakeMqttClient;
+    late StreamController<List<ConnectivityResult>> connectivityController;
+    late MqttRemoteService service;
+
+    setUp(() async {
+      SharedPreferences.setMockInitialValues({
+        'mqtt_enabled': true,
+        'mqtt_host': '192.168.1.50',
+        'mqtt_port': 1883,
+        'mqtt_slug': 'kids_tablet',
+      });
+      await SharedPreferences.getInstance();
+      mockAudioPlayerService = MockAudioPlayerService();
+      fakeMqttClient = FakeMqttClientAdapter();
+      connectivityController = StreamController<List<ConnectivityResult>>.broadcast();
+
+      when(() => mockAudioPlayerService.isPlaying).thenReturn(false);
+      when(() => mockAudioPlayerService.nowPlayingTitle).thenReturn('');
+      when(() => mockAudioPlayerService.currentTitle).thenReturn('');
+      when(() => mockAudioPlayerService.currentAuthor).thenReturn('');
+      when(() => mockAudioPlayerService.currentCoverUrl).thenReturn(null);
+      when(() => mockAudioPlayerService.totalDuration).thenReturn(0.0);
+      when(() => mockAudioPlayerService.position).thenReturn(Duration.zero);
+      when(() => mockAudioPlayerService.volume).thenReturn(1.0);
+      when(() => mockAudioPlayerService.speed).thenReturn(1.0);
+      when(() => mockAudioPlayerService.chapters).thenReturn([]);
+      when(() => mockAudioPlayerService.currentChapter).thenReturn(null);
+
+      service = MqttRemoteService.forTesting(
+        audioPlayerService: mockAudioPlayerService,
+        clientAdapter: fakeMqttClient,
+        enableJitter: false,
+        connectivityStream: connectivityController.stream,
+      );
+    });
+
+    tearDown(() {
+      service.dispose();
+      fakeMqttClient.dispose();
+      connectivityController.close();
+    });
+
+    test('accepts optional connectivity stream and tracks connectivity state', () async {
+      await MqttSettings.setEnabled(false);
+      expect(service.isNetworkOnline, isFalse);
+
+      connectivityController.add([ConnectivityResult.wifi]);
+      await Future<void>.delayed(Duration.zero);
+      expect(service.isNetworkOnline, isTrue);
+
+      connectivityController.add([ConnectivityResult.none]);
+      await Future<void>.delayed(Duration.zero);
+      expect(service.isNetworkOnline, isFalse);
+    });
+
+    test('triggers immediate reconnection when transitioning from offline to online if MQTT is enabled and currently disconnected', () async {
+      // Initially disconnected
+      expect(service.connectionStatus, equals(MqttConnectionStatus.disconnected));
+
+      // Start with offline network
+      connectivityController.add([ConnectivityResult.none]);
+      await Future<void>.delayed(Duration.zero);
+      expect(service.connectionStatus, equals(MqttConnectionStatus.disconnected));
+
+      // Network restored to Wi-Fi
+      connectivityController.add([ConnectivityResult.wifi]);
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+
+      // Immediately connects without waiting for timer
+      expect(service.connectionStatus, equals(MqttConnectionStatus.connected));
+      expect(service.isReconnecting, isFalse);
+      expect(service.reconnectAttempts, equals(0));
+    });
+
+    test('triggers immediate reconnection when transitioning from offline to online if in error state', () async {
+      // Simulate failed connect attempt resulting in error
+      fakeMqttClient.shouldSucceed = false;
+      await service.connectFromSettings();
+      expect(service.connectionStatus, equals(MqttConnectionStatus.error));
+
+      // Network transitions to offline then restored to mobile
+      connectivityController.add([ConnectivityResult.none]);
+      await Future<void>.delayed(Duration.zero);
+
+      fakeMqttClient.shouldSucceed = true;
+      connectivityController.add([ConnectivityResult.mobile]);
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+
+      expect(service.connectionStatus, equals(MqttConnectionStatus.connected));
+      expect(service.reconnectAttempts, equals(0));
+    });
+
+    test('does not trigger reconnection on network restored if MQTT is disabled in settings', () async {
+      await MqttSettings.setEnabled(false);
+
+      connectivityController.add([ConnectivityResult.none]);
+      await Future<void>.delayed(Duration.zero);
+
+      connectivityController.add([ConnectivityResult.wifi]);
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+
+      expect(service.connectionStatus, equals(MqttConnectionStatus.disconnected));
+      expect(service.isReconnecting, isFalse);
+    });
+
+    test('does not trigger reconnection on network restored if already connected', () async {
+      await service.connect(
+        host: '192.168.1.50',
+        slug: 'kids_tablet',
+      );
+      expect(service.connectionStatus, equals(MqttConnectionStatus.connected));
+
+      // Network stream emits wifi while already connected
+      connectivityController.add([ConnectivityResult.wifi]);
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+
+      // Remains connected, does not re-enter connect flow
+      expect(service.connectionStatus, equals(MqttConnectionStatus.connected));
+    });
+
+    test('cancels active backoff retry timer and resets backoff retry delays upon successful reconnect on network restored', () async {
+      await service.connect(
+        host: '192.168.1.50',
+        slug: 'kids_tablet',
+      );
+      expect(service.connectionStatus, equals(MqttConnectionStatus.connected));
+
+      // Disconnect unexpectedly
+      fakeMqttClient.simulateDisconnect();
+      await Future<void>.delayed(Duration.zero);
+      expect(service.isReconnecting, isTrue);
+      expect(service.reconnectAttempts, equals(0));
+
+      // Network drops
+      connectivityController.add([ConnectivityResult.none]);
+      await Future<void>.delayed(Duration.zero);
+      expect(service.isReconnecting, isTrue);
+
+      // Network restores now before timer expires!
+      connectivityController.add([ConnectivityResult.wifi]);
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+
+      // Reconnect fired immediately, timer cancelled, attempts reset
+      expect(service.connectionStatus, equals(MqttConnectionStatus.connected));
+      expect(service.isReconnecting, isFalse);
+      expect(service.reconnectAttempts, equals(0));
+    });
+
+    test('resets retry delay and reschedules backoff if reconnect attempt fails upon network restoration', () async {
+      await service.connect(
+        host: '192.168.1.50',
+        slug: 'kids_tablet',
+      );
+
+      // Simulate unexpected disconnect
+      fakeMqttClient.simulateDisconnect();
+      await Future<void>.delayed(Duration.zero);
+      expect(service.isReconnecting, isTrue);
+
+      // Network drops then comes online, but broker is unreachable
+      fakeMqttClient.shouldSucceed = false;
+      connectivityController.add([ConnectivityResult.none]);
+      await Future<void>.delayed(Duration.zero);
+
+      connectivityController.add([ConnectivityResult.ethernet]);
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+
+      // Reconnect attempted immediately and failed: attempts reset to 0 then incremented to 1
+      expect(service.connectionStatus, equals(MqttConnectionStatus.error));
+      expect(service.reconnectAttempts, equals(1));
+      expect(service.isReconnecting, isTrue);
+      // Next backoff is for attempt 1 (4s), NOT 32s
+      expect(service.computeReconnectDelay(service.reconnectAttempts), equals(const Duration(seconds: 4)));
+    });
+
+    test('does not trigger reconnection on redundant online transitions without prior offline state', () async {
+      connectivityController.add([ConnectivityResult.wifi]);
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      expect(service.connectionStatus, equals(MqttConnectionStatus.connected));
+
+      // Disconnect explicitly
+      service.disconnect();
+      expect(service.connectionStatus, equals(MqttConnectionStatus.disconnected));
+
+      // Emitting another online result (e.g. cellular or vpn) without offline first
+      connectivityController.add([ConnectivityResult.mobile]);
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+
+      // Should NOT have triggered reconnect
+      expect(service.connectionStatus, equals(MqttConnectionStatus.disconnected));
+    });
+
+    test('connectivity subscription persists across disconnect and reconnect cycles until disposed', () async {
+      connectivityController.add([ConnectivityResult.wifi]);
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      expect(service.connectionStatus, equals(MqttConnectionStatus.connected));
+
+      // Disconnect
+      service.disconnect();
+      expect(service.connectionStatus, equals(MqttConnectionStatus.disconnected));
+
+      // Cycle network: offline -> online
+      connectivityController.add([ConnectivityResult.none]);
+      await Future<void>.delayed(Duration.zero);
+      connectivityController.add([ConnectivityResult.wifi]);
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+
+      // Reconnected!
+      expect(service.connectionStatus, equals(MqttConnectionStatus.connected));
+
+      // Dispose cancels connectivity subscription
+      service.dispose();
+      connectivityController.add([ConnectivityResult.none]);
+      await Future<void>.delayed(Duration.zero);
+      connectivityController.add([ConnectivityResult.wifi]);
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+
+      expect(service.connectionStatus, equals(MqttConnectionStatus.disconnected));
     });
   });
 }
