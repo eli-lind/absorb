@@ -912,4 +912,139 @@ void main() {
           ));
     });
   });
+
+  group('MqttRemoteService Ticket #6: Home Assistant MQTT Discovery', () {
+    late MockAudioPlayerService mockAudioPlayerService;
+    late FakeMqttClientAdapter fakeMqttClient;
+    late MqttRemoteService service;
+
+    setUp(() {
+      SharedPreferences.setMockInitialValues({});
+      mockAudioPlayerService = MockAudioPlayerService();
+      fakeMqttClient = FakeMqttClientAdapter();
+
+      when(() => mockAudioPlayerService.isPlaying).thenReturn(false);
+      when(() => mockAudioPlayerService.nowPlayingTitle).thenReturn('');
+      when(() => mockAudioPlayerService.currentTitle).thenReturn('');
+      when(() => mockAudioPlayerService.currentAuthor).thenReturn('');
+      when(() => mockAudioPlayerService.currentCoverUrl).thenReturn(null);
+      when(() => mockAudioPlayerService.totalDuration).thenReturn(0.0);
+      when(() => mockAudioPlayerService.position).thenReturn(Duration.zero);
+      when(() => mockAudioPlayerService.volume).thenReturn(1.0);
+      when(() => mockAudioPlayerService.speed).thenReturn(1.0);
+      when(() => mockAudioPlayerService.chapters).thenReturn([]);
+      when(() => mockAudioPlayerService.currentChapter).thenReturn(null);
+
+      service = MqttRemoteService.forTesting(
+        audioPlayerService: mockAudioPlayerService,
+        clientAdapter: fakeMqttClient,
+      );
+    });
+
+    tearDown(() {
+      service.dispose();
+      fakeMqttClient.dispose();
+    });
+
+    test('publishes retained media_player discovery configuration on connect', () async {
+      await service.connect(
+        host: '192.168.1.50',
+        slug: 'kids_tablet',
+        enableDiscovery: true,
+      );
+
+      final discoveryMsg = fakeMqttClient.publishedMessages.firstWhere(
+        (m) => m.topic == 'homeassistant/media_player/kids_tablet/config',
+      );
+      expect(discoveryMsg.retain, isTrue);
+
+      final payload = jsonDecode(discoveryMsg.payload) as Map<String, dynamic>;
+      expect(payload['unique_id'], equals('absorb_kids_tablet_media_player'));
+      expect(payload['state_topic'], equals('absorb/kids_tablet/state'));
+      expect(payload['command_topic'], equals('absorb/kids_tablet/set'));
+      expect(payload['seek_topic'], equals('absorb/kids_tablet/seek/set'));
+      expect(payload['volume_command_topic'], equals('absorb/kids_tablet/volume/set'));
+      expect(payload['availability_topic'], equals('absorb/kids_tablet/status'));
+      expect(payload['payload_available'], equals('online'));
+      expect(payload['payload_not_available'], equals('offline'));
+
+      final features = List<String>.from(payload['supported_features'] as List);
+      expect(features, containsAll([
+        'play',
+        'pause',
+        'stop',
+        'seek',
+        'volume_set',
+        'next_track',
+        'previous_track',
+        'play_media',
+      ]));
+
+      final device = payload['device'] as Map<String, dynamic>;
+      expect(device['identifiers'], contains('absorb_kids_tablet'));
+      expect(device['name'], equals('Absorb (kids_tablet)'));
+      expect(device['model'], contains('SM-T220'));
+      expect(device['sw_version'], isNotEmpty);
+    });
+
+    test('publishes retained sleep timer sensor discovery configuration on connect', () async {
+      await service.connect(
+        host: '192.168.1.50',
+        slug: 'kids_tablet',
+        enableDiscovery: true,
+      );
+
+      final discoveryMsg = fakeMqttClient.publishedMessages.firstWhere(
+        (m) => m.topic == 'homeassistant/sensor/kids_tablet_sleep_timer/config',
+      );
+      expect(discoveryMsg.retain, isTrue);
+
+      final payload = jsonDecode(discoveryMsg.payload) as Map<String, dynamic>;
+      expect(payload['unique_id'], equals('absorb_kids_tablet_sleep_timer'));
+      expect(payload['state_topic'], equals('absorb/kids_tablet/sleep_timer'));
+      expect(payload['value_template'], equals('{{ value_json.remaining_seconds }}'));
+      expect(payload['unit_of_measurement'], equals('s'));
+      expect(payload['device_class'], equals('duration'));
+      expect(payload['availability_topic'], equals('absorb/kids_tablet/status'));
+
+      final device = payload['device'] as Map<String, dynamic>;
+      expect(device['identifiers'], contains('absorb_kids_tablet'));
+      expect(device['name'], equals('Absorb (kids_tablet)'));
+    });
+
+    test('publishes retained end-of-chapter sleep button discovery configuration on connect', () async {
+      await service.connect(
+        host: '192.168.1.50',
+        slug: 'kids_tablet',
+        enableDiscovery: true,
+      );
+
+      final discoveryMsg = fakeMqttClient.publishedMessages.firstWhere(
+        (m) => m.topic == 'homeassistant/button/kids_tablet_sleep_chapter/config',
+      );
+      expect(discoveryMsg.retain, isTrue);
+
+      final payload = jsonDecode(discoveryMsg.payload) as Map<String, dynamic>;
+      expect(payload['unique_id'], equals('absorb_kids_tablet_sleep_chapter'));
+      expect(payload['command_topic'], equals('absorb/kids_tablet/sleep_timer/set'));
+      expect(jsonDecode(payload['payload_press']), equals({'mode': 'end_of_chapter'}));
+      expect(payload['availability_topic'], equals('absorb/kids_tablet/status'));
+
+      final device = payload['device'] as Map<String, dynamic>;
+      expect(device['identifiers'], contains('absorb_kids_tablet'));
+      expect(device['name'], equals('Absorb (kids_tablet)'));
+    });
+
+    test('does not publish discovery when enableDiscovery is false', () async {
+      await service.connect(
+        host: '192.168.1.50',
+        slug: 'kids_tablet',
+        enableDiscovery: false,
+      );
+
+      final discoveryMessages = fakeMqttClient.publishedMessages
+          .where((m) => m.topic.startsWith('homeassistant/'));
+      expect(discoveryMessages, isEmpty);
+    });
+  });
 }

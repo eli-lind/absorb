@@ -212,6 +212,12 @@ class MqttRemoteService {
   String get sleepTimerTopic => 'absorb/$_slug/sleep_timer';
   String get sleepTimerSetTopic => 'absorb/$_slug/sleep_timer/set';
   String get playMediaTopic => 'absorb/$_slug/play_media/set';
+  String get discoveryMediaPlayerTopic =>
+      'homeassistant/media_player/$_slug/config';
+  String get discoverySleepTimerSensorTopic =>
+      'homeassistant/sensor/${_slug}_sleep_timer/config';
+  String get discoverySleepChapterButtonTopic =>
+      'homeassistant/button/${_slug}_sleep_chapter/config';
 
   static String sanitizeSlug(String rawSlug) {
     final sanitized = rawSlug.trim().replaceAll(RegExp(r'[^a-zA-Z0-9_-]'), '_');
@@ -225,6 +231,7 @@ class MqttRemoteService {
     String? username,
     String? password,
     bool useTls = false,
+    bool enableDiscovery = true,
   }) async {
     _slug = sanitizeSlug(slug);
     final resolvedPort = port ?? (useTls ? 8883 : 1883);
@@ -281,7 +288,96 @@ class MqttRemoteService {
     onPlayerStateChanged(force: true);
     onSleepTimerChanged(force: true);
 
+    if (enableDiscovery) {
+      publishDiscovery();
+    }
+
     return true;
+  }
+
+  Map<String, dynamic> buildDeviceMetadata() {
+    return {
+      'identifiers': ['absorb_$_slug'],
+      'name': 'Absorb ($_slug)',
+      'model': 'Galaxy Tab A7 Lite (SM-T220)',
+      'manufacturer': 'Samsung',
+      'sw_version': ApiService.appVersionFull,
+    };
+  }
+
+  Map<String, dynamic> buildMediaPlayerDiscoveryPayload() {
+    return {
+      'name': 'Absorb ($_slug)',
+      'unique_id': 'absorb_${_slug}_media_player',
+      'state_topic': stateTopic,
+      'command_topic': commandTopic,
+      'seek_topic': seekTopic,
+      'volume_command_topic': volumeTopic,
+      'volume_state_topic': stateTopic,
+      'volume_state_template': '{{ value_json.volume }}',
+      'availability_topic': statusTopic,
+      'payload_available': 'online',
+      'payload_not_available': 'offline',
+      'supported_features': [
+        'play',
+        'pause',
+        'stop',
+        'seek',
+        'volume_set',
+        'next_track',
+        'previous_track',
+        'play_media',
+      ],
+      'device': buildDeviceMetadata(),
+    };
+  }
+
+  Map<String, dynamic> buildSleepTimerSensorDiscoveryPayload() {
+    return {
+      'name': 'Absorb ($_slug) Sleep Timer',
+      'unique_id': 'absorb_${_slug}_sleep_timer',
+      'state_topic': sleepTimerTopic,
+      'value_template': '{{ value_json.remaining_seconds }}',
+      'unit_of_measurement': 's',
+      'device_class': 'duration',
+      'availability_topic': statusTopic,
+      'payload_available': 'online',
+      'payload_not_available': 'offline',
+      'icon': 'mdi:timer-sand',
+      'device': buildDeviceMetadata(),
+    };
+  }
+
+  Map<String, dynamic> buildSleepChapterButtonDiscoveryPayload() {
+    return {
+      'name': 'Absorb ($_slug) Sleep End of Chapter',
+      'unique_id': 'absorb_${_slug}_sleep_chapter',
+      'command_topic': sleepTimerSetTopic,
+      'payload_press': jsonEncode({'mode': 'end_of_chapter'}),
+      'availability_topic': statusTopic,
+      'payload_available': 'online',
+      'payload_not_available': 'offline',
+      'icon': 'mdi:timer-off-outline',
+      'device': buildDeviceMetadata(),
+    };
+  }
+
+  void publishDiscovery() {
+    _clientAdapter.publish(
+      discoveryMediaPlayerTopic,
+      jsonEncode(buildMediaPlayerDiscoveryPayload()),
+      retain: true,
+    );
+    _clientAdapter.publish(
+      discoverySleepTimerSensorTopic,
+      jsonEncode(buildSleepTimerSensorDiscoveryPayload()),
+      retain: true,
+    );
+    _clientAdapter.publish(
+      discoverySleepChapterButtonTopic,
+      jsonEncode(buildSleepChapterButtonDiscoveryPayload()),
+      retain: true,
+    );
   }
 
   Future<void> _handleInboundMessage(String topic, String payload) async {
