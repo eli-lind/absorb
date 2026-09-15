@@ -5,6 +5,7 @@ import 'package:mqtt_client/mqtt_client.dart';
 import 'package:mqtt_client/mqtt_server_client.dart';
 import 'audio_player_service.dart';
 
+
 class PublishedMqttMessage {
   final String topic;
   final String payload;
@@ -144,6 +145,14 @@ class DefaultMqttClientAdapter implements MqttClientAdapter {
   }
 }
 
+typedef _PlayerSnapshot = ({
+  bool isPlaying,
+  String? book,
+  String? chapter,
+  double speed,
+  double positionSec,
+});
+
 class MqttRemoteService {
   static final MqttRemoteService _instance = MqttRemoteService._();
   factory MqttRemoteService() => _instance;
@@ -165,11 +174,7 @@ class MqttRemoteService {
   StreamSubscription? _incomingSub;
   Timer? _heartbeatTimer;
   bool _isPlayerListenerAttached = false;
-
-  bool? _lastIsPlaying;
-  String? _lastBook;
-  String? _lastChapterTitle;
-  double? _lastSpeed;
+  _PlayerSnapshot? _lastSnapshot;
 
   bool get isConnected => _clientAdapter.isConnected;
   String get slug => _slug;
@@ -241,22 +246,26 @@ class MqttRemoteService {
     return true;
   }
 
-  void _handleInboundMessage(String topic, String payload) {
+  Future<void> _handleInboundMessage(String topic, String payload) async {
     if (topic == commandTopic) {
       final command = payload.trim().toUpperCase();
       if (command == 'PLAY') {
-        _audioPlayerService.play(fromUi: false);
+        await _audioPlayerService.play(fromUi: false);
       } else if (command == 'PAUSE') {
-        _audioPlayerService.pause();
+        await _audioPlayerService.pause();
       } else if (command == 'SKIP_FORWARD') {
-        _audioPlayerService.skipForward();
+        final skipSec = await PlayerSettings.getForwardSkip();
+        await _audioPlayerService.skipForward(skipSec);
+        _publishState();
       } else if (command == 'SKIP_BACKWARD') {
-        _audioPlayerService.skipBackward();
+        final skipSec = await PlayerSettings.getBackSkip();
+        await _audioPlayerService.skipBackward(skipSec);
+        _publishState();
       }
     } else if (topic == seekTopic) {
       final seconds = num.tryParse(payload.trim())?.toDouble();
       if (seconds != null && seconds >= 0) {
-        _audioPlayerService.seekTo(
+        await _audioPlayerService.seekTo(
           Duration(milliseconds: (seconds * 1000).round()),
         );
         _publishState();
@@ -266,7 +275,7 @@ class MqttRemoteService {
       if (val != null) {
         final targetVol =
             val > 1.0 ? (val / 100.0).clamp(0.0, 1.0) : val.clamp(0.0, 1.0);
-        _audioPlayerService.setVolume(targetVol);
+        await _audioPlayerService.setVolume(targetVol);
         _publishState();
       }
     }
@@ -304,7 +313,6 @@ class MqttRemoteService {
       'speed': _audioPlayerService.speed,
       'cover_url': _audioPlayerService.currentCoverUrl,
     };
-
   }
 
   void _publishState() {
@@ -317,19 +325,29 @@ class MqttRemoteService {
     final book = _audioPlayerService.currentTitle;
     final chapter = _audioPlayerService.currentChapter?['title'] as String?;
     final speed = _audioPlayerService.speed;
+    final posSec = _audioPlayerService.position.inMilliseconds / 1000.0;
+
+    final isSeek = _lastSnapshot != null &&
+        _lastSnapshot!.isPlaying &&
+        isPlaying &&
+        (posSec - _lastSnapshot!.positionSec).abs() > 2.0;
 
     final hasStateTransition = force ||
-        _lastIsPlaying != isPlaying ||
-        _lastBook != book ||
-        _lastChapterTitle != chapter ||
-        _lastSpeed != speed;
+        _lastSnapshot?.isPlaying != isPlaying ||
+        _lastSnapshot?.book != book ||
+        _lastSnapshot?.chapter != chapter ||
+        _lastSnapshot?.speed != speed ||
+        isSeek;
+
+    _lastSnapshot = (
+      isPlaying: isPlaying,
+      book: book,
+      chapter: chapter,
+      speed: speed,
+      positionSec: posSec,
+    );
 
     if (hasStateTransition) {
-      _lastIsPlaying = isPlaying;
-      _lastBook = book;
-      _lastChapterTitle = chapter;
-      _lastSpeed = speed;
-
       _publishState();
 
       if (isPlaying) {
@@ -364,10 +382,7 @@ class MqttRemoteService {
       _isPlayerListenerAttached = false;
     }
     _clientAdapter.disconnect();
-    _lastIsPlaying = null;
-    _lastBook = null;
-    _lastChapterTitle = null;
-    _lastSpeed = null;
+    _lastSnapshot = null;
   }
 
   void dispose() {

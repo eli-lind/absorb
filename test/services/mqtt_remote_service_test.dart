@@ -2,11 +2,11 @@ import 'dart:async';
 import 'dart:convert';
 import 'package:fake_async/fake_async.dart';
 import 'package:flutter_test/flutter_test.dart';
-
-
 import 'package:mocktail/mocktail.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:absorb/services/mqtt_remote_service.dart';
 import 'package:absorb/services/audio_player_service.dart';
+
 
 
 class MockAudioPlayerService extends Mock implements AudioPlayerService {}
@@ -219,6 +219,7 @@ void main() {
     late MqttRemoteService service;
 
     setUp(() {
+      SharedPreferences.setMockInitialValues({});
       mockAudioPlayerService = MockAudioPlayerService();
       fakeMqttClient = FakeMqttClientAdapter();
 
@@ -319,12 +320,13 @@ void main() {
 
       fakeMqttClient.simulateInboundMessage('absorb/kids_tablet/set', 'SKIP_FORWARD');
       await Future<void>.delayed(Duration.zero);
-      verify(() => mockAudioPlayerService.skipForward()).called(1);
+      verify(() => mockAudioPlayerService.skipForward(30)).called(1);
 
       fakeMqttClient.simulateInboundMessage('absorb/kids_tablet/set', 'SKIP_BACKWARD');
       await Future<void>.delayed(Duration.zero);
-      verify(() => mockAudioPlayerService.skipBackward()).called(1);
+      verify(() => mockAudioPlayerService.skipBackward(10)).called(1);
     });
+
 
     test('throttles position heartbeat to 10-second interval during active playback', () async {
       fakeAsync((async) {
