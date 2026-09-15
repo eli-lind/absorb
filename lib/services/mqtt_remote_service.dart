@@ -301,10 +301,8 @@ class MqttRemoteService {
         _publishState();
       } else if (command == 'NEXT_CHAPTER') {
         await _audioPlayerService.skipToNextChapter();
-        _publishState();
       } else if (command == 'PREV_CHAPTER') {
         await _audioPlayerService.skipToPreviousChapter();
-        _publishState();
       }
     } else if (topic == seekTopic) {
       final seconds = num.tryParse(payload.trim())?.toDouble();
@@ -396,8 +394,9 @@ class MqttRemoteService {
         return;
       }
 
-      if (_downloadService.isDownloaded(itemId)) {
-        final dl = _downloadService.getInfo(itemId);
+      final dlKey = episodeId != null ? '$itemId-$episodeId' : itemId;
+      if (_downloadService.isDownloaded(dlKey)) {
+        final dl = _downloadService.getInfo(dlKey);
         double duration = 0.0;
         List<dynamic> chapters = [];
         if (dl.sessionData != null) {
@@ -421,7 +420,6 @@ class MqttRemoteService {
           episodeTitle: episodeId != null ? dl.title : null,
           libraryId: dl.libraryId,
         );
-        _publishState();
         return;
       }
 
@@ -434,49 +432,46 @@ class MqttRemoteService {
 
       final media = fullItem['media'] as Map<String, dynamic>? ?? {};
       final metadata = media['metadata'] as Map<String, dynamic>? ?? {};
-      final title = metadata['title'] as String? ?? '';
+      final showOrBookTitle = metadata['title'] as String? ?? '';
       final author = metadata['authorName'] as String? ?? '';
       final coverUrl = api.getCoverUrl(itemId, width: 400);
-      final duration = (media['duration'] as num?)?.toDouble() ?? 0.0;
-      final chapters = (media['chapters'] as List<dynamic>?) ?? [];
       final libraryId = fullItem['libraryId'] as String?;
+
+      String playTitle = showOrBookTitle;
+      String playAuthor = author;
+      double playDuration = (media['duration'] as num?)?.toDouble() ?? 0.0;
+      List<dynamic> playChapters = (media['chapters'] as List<dynamic>?) ?? [];
+      String? episodeTitle;
 
       if (episodeId != null) {
         final episodes = (media['episodes'] as List<dynamic>?) ?? [];
-        final episode = episodes.cast<Map<String, dynamic>>().firstWhere(
-          (e) => e['id'] == episodeId,
-          orElse: () => <String, dynamic>{},
+        final ep = episodes.cast<Map<String, dynamic>?>().firstWhere(
+          (e) => e?['id'] == episodeId,
+          orElse: () => null,
         );
-        final epTitle = episode['title'] as String? ?? title;
-        final epDuration =
-            (episode['duration'] as num?)?.toDouble() ?? duration;
-        final epChapters = (episode['chapters'] as List<dynamic>?) ?? [];
-
-        await _audioPlayerService.playItem(
-          api: api,
-          itemId: itemId,
-          title: epTitle,
-          author: title,
-          coverUrl: coverUrl,
-          totalDuration: epDuration,
-          chapters: epChapters,
-          episodeId: episodeId,
-          episodeTitle: epTitle,
-          libraryId: libraryId,
-        );
-      } else {
-        await _audioPlayerService.playItem(
-          api: api,
-          itemId: itemId,
-          title: title,
-          author: author,
-          coverUrl: coverUrl,
-          totalDuration: duration,
-          chapters: chapters,
-          libraryId: libraryId,
-        );
+        if (ep == null) {
+          debugPrint('[MqttRemoteService] play_media: Episode not found: $episodeId');
+          return;
+        }
+        playTitle = ep['title'] as String? ?? showOrBookTitle;
+        playAuthor = showOrBookTitle;
+        playDuration = (ep['duration'] as num?)?.toDouble() ?? playDuration;
+        playChapters = (ep['chapters'] as List<dynamic>?) ?? [];
+        episodeTitle = playTitle;
       }
-      _publishState();
+
+      await _audioPlayerService.playItem(
+        api: api,
+        itemId: itemId,
+        title: playTitle,
+        author: playAuthor,
+        coverUrl: coverUrl,
+        totalDuration: playDuration,
+        chapters: playChapters,
+        episodeId: episodeId,
+        episodeTitle: episodeTitle,
+        libraryId: libraryId,
+      );
     } catch (e) {
       debugPrint('[MqttRemoteService] play_media failed: $e');
     }

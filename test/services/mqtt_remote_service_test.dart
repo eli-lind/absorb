@@ -836,5 +836,80 @@ void main() {
             chapters: any(named: 'chapters'),
           ));
     });
+
+    test('resolves downloaded episode using compound itemId-episodeId key', () async {
+      when(() => mockDownloadService.isDownloaded('show-pod-1-ep-99')).thenReturn(true);
+      when(() => mockDownloadService.getInfo('show-pod-1-ep-99')).thenReturn(DownloadInfo(
+        itemId: 'show-pod-1-ep-99',
+        title: 'Downloaded Episode Title',
+        author: 'Show Author',
+        coverUrl: 'file:///local/show.jpg',
+        libraryId: 'lib-podcasts',
+        sessionData: jsonEncode({
+          'duration': 1200.0,
+          'chapters': [],
+        }),
+      ));
+
+      await service.connect(
+        host: '192.168.1.50',
+        slug: 'kids_tablet',
+      );
+
+      fakeMqttClient.simulateInboundMessage(
+        'absorb/kids_tablet/play_media/set',
+        jsonEncode({'item_id': 'show-pod-1', 'episode_id': 'ep-99'}),
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      verifyNever(() => mockApiService.getLibraryItem(any()));
+      verify(() => mockAudioPlayerService.playItem(
+            api: mockApiService,
+            itemId: 'show-pod-1',
+            title: 'Downloaded Episode Title',
+            author: 'Show Author',
+            coverUrl: 'file:///local/show.jpg',
+            totalDuration: 1200.0,
+            chapters: [],
+            episodeId: 'ep-99',
+            episodeTitle: 'Downloaded Episode Title',
+            libraryId: 'lib-podcasts',
+          )).called(1);
+    });
+
+    test('gracefully rejects when requested episode_id is not found on item', () async {
+      when(() => mockApiService.getLibraryItem('show-missing-ep')).thenAnswer((_) async => {
+            'id': 'show-missing-ep',
+            'media': {
+              'metadata': {'title': 'Some Show', 'authorName': 'Author'},
+              'episodes': [
+                {'id': 'ep-1', 'title': 'Ep 1'}
+              ],
+            },
+          });
+      when(() => mockApiService.getCoverUrl(any(), width: any(named: 'width')))
+          .thenReturn('https://abs.local/cover.jpg');
+
+      await service.connect(
+        host: '192.168.1.50',
+        slug: 'kids_tablet',
+      );
+
+      fakeMqttClient.simulateInboundMessage(
+        'absorb/kids_tablet/play_media/set',
+        jsonEncode({'item_id': 'show-missing-ep', 'episode_id': 'ep-nonexistent'}),
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      verifyNever(() => mockAudioPlayerService.playItem(
+            api: any(named: 'api'),
+            itemId: any(named: 'itemId'),
+            title: any(named: 'title'),
+            author: any(named: 'author'),
+            coverUrl: any(named: 'coverUrl'),
+            totalDuration: any(named: 'totalDuration'),
+            chapters: any(named: 'chapters'),
+          ));
+    });
   });
 }
