@@ -154,6 +154,13 @@ typedef _PlayerSnapshot = ({
   double positionSec,
 });
 
+typedef _SleepTimerSnapshot = ({
+  bool active,
+  String mode,
+  int remainingSeconds,
+  int initialMinutes,
+});
+
 class MqttRemoteService {
   static final MqttRemoteService _instance = MqttRemoteService._();
   factory MqttRemoteService() => _instance;
@@ -181,6 +188,7 @@ class MqttRemoteService {
   bool _isPlayerListenerAttached = false;
   bool _isSleepTimerListenerAttached = false;
   _PlayerSnapshot? _lastSnapshot;
+  _SleepTimerSnapshot? _lastSleepSnapshot;
 
   bool get isConnected => _clientAdapter.isConnected;
   String get slug => _slug;
@@ -257,7 +265,7 @@ class MqttRemoteService {
 
     // Initial state publish
     onPlayerStateChanged(force: true);
-    onSleepTimerChanged();
+    onSleepTimerChanged(force: true);
 
     return true;
   }
@@ -305,37 +313,20 @@ class MqttRemoteService {
 
     try {
       final decoded = jsonDecode(trimmed);
-      if (decoded is Map<String, dynamic>) {
-        if (decoded['cancel'] == true || decoded['mode'] == 'off') {
-          _sleepTimerService.cancel();
-          return;
-        }
-        if (decoded['mode'] == 'end_of_chapter') {
-          _sleepTimerService.setChapterSleep(1);
-          return;
-        }
-        final durationMinutes =
-            decoded['duration_minutes'] ?? decoded['minutes'] ?? decoded['duration'];
-        if (durationMinutes is num && durationMinutes > 0) {
-          _sleepTimerService.setTimeSleep(Duration(minutes: durationMinutes.toInt()));
-          return;
+      if (decoded is! Map<String, dynamic>) return;
+
+      if (decoded['cancel'] == true) {
+        _sleepTimerService.cancel();
+      } else if (decoded['mode'] == 'end_of_chapter') {
+        _sleepTimerService.setChapterSleep(1);
+      } else if (decoded['duration_minutes'] is num) {
+        final minutes = (decoded['duration_minutes'] as num).toInt();
+        if (minutes > 0) {
+          _sleepTimerService.setTimeSleep(Duration(minutes: minutes));
         }
       }
     } catch (_) {
-      // Fall through to non-JSON string handling below
-    }
-
-    // Fallback for simple string payloads
-    final upper = trimmed.toUpperCase();
-    if (upper == 'CANCEL' || upper == 'OFF') {
-      _sleepTimerService.cancel();
-    } else if (trimmed.toLowerCase() == 'end_of_chapter') {
-      _sleepTimerService.setChapterSleep(1);
-    } else {
-      final minutes = int.tryParse(trimmed);
-      if (minutes != null && minutes > 0) {
-        _sleepTimerService.setTimeSleep(Duration(minutes: minutes));
-      }
+      // Malformed JSON is ignored
     }
   }
 
@@ -348,13 +339,33 @@ class MqttRemoteService {
     };
   }
 
-  void onSleepTimerChanged() {
-    _publishSleepTimer();
-  }
+  void onSleepTimerChanged({bool force = false}) {
+    final payload = buildSleepTimerPayload();
+    final active = payload['active'] as bool;
+    final mode = payload['mode'] as String;
+    final remainingSec = payload['remaining_seconds'] as int;
+    final initialMin = payload['initial_minutes'] as int;
 
-  void _publishSleepTimer() {
-    final payload = jsonEncode(buildSleepTimerPayload());
-    _clientAdapter.publish(sleepTimerTopic, payload, retain: true);
+    final isStateTransition = force ||
+        _lastSleepSnapshot == null ||
+        _lastSleepSnapshot!.active != active ||
+        _lastSleepSnapshot!.mode != mode ||
+        _lastSleepSnapshot!.initialMinutes != initialMin ||
+        remainingSec == 0;
+
+    final isThrottledTick = _lastSleepSnapshot != null &&
+        (_lastSleepSnapshot!.remainingSeconds - remainingSec).abs() >= 10;
+
+    if (isStateTransition || isThrottledTick) {
+      _lastSleepSnapshot = (
+        active: active,
+        mode: mode,
+        remainingSeconds: remainingSec,
+        initialMinutes: initialMin,
+      );
+      final encoded = jsonEncode(payload);
+      _clientAdapter.publish(sleepTimerTopic, encoded, retain: true);
+    }
   }
 
   Map<String, dynamic> buildStatePayload() {
@@ -463,6 +474,7 @@ class MqttRemoteService {
     }
     _clientAdapter.disconnect();
     _lastSnapshot = null;
+    _lastSleepSnapshot = null;
   }
 
   void dispose() {

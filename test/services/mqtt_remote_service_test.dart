@@ -519,5 +519,65 @@ void main() {
 
       verify(() => mockSleepTimerService.cancel()).called(1);
     });
+
+    test('throttles countdown ticks to 10-second intervals and emits transitions immediately', () async {
+      await service.connect(
+        host: '192.168.1.50',
+        slug: 'kids_tablet',
+      );
+
+      // Start a 15-minute timer -> transition from off to time emits immediately
+      when(() => mockSleepTimerService.isActive).thenReturn(true);
+      when(() => mockSleepTimerService.mode).thenReturn(SleepTimerMode.time);
+      when(() => mockSleepTimerService.initialDuration).thenReturn(const Duration(minutes: 15));
+      when(() => mockSleepTimerService.timeRemaining).thenReturn(const Duration(seconds: 900));
+
+      for (final listener in sleepTimerListeners) {
+        listener();
+      }
+
+      final count = fakeMqttClient.publishedMessages
+          .where((m) => m.topic == 'absorb/kids_tablet/sleep_timer')
+          .length;
+
+      // 1-second tick (899s): diff is 1s (< 10s), no new message emitted
+      when(() => mockSleepTimerService.timeRemaining).thenReturn(const Duration(seconds: 899));
+      for (final listener in sleepTimerListeners) {
+        listener();
+      }
+      expect(
+        fakeMqttClient.publishedMessages
+            .where((m) => m.topic == 'absorb/kids_tablet/sleep_timer')
+            .length,
+        equals(count),
+      );
+
+      // 10-second diff (890s): emits updated message
+      when(() => mockSleepTimerService.timeRemaining).thenReturn(const Duration(seconds: 890));
+      for (final listener in sleepTimerListeners) {
+        listener();
+      }
+      expect(
+        fakeMqttClient.publishedMessages
+            .where((m) => m.topic == 'absorb/kids_tablet/sleep_timer')
+            .length,
+        equals(count + 1),
+      );
+
+      // Cancellation transition -> emits immediately regardless of throttle
+      when(() => mockSleepTimerService.isActive).thenReturn(false);
+      when(() => mockSleepTimerService.mode).thenReturn(SleepTimerMode.off);
+      when(() => mockSleepTimerService.timeRemaining).thenReturn(Duration.zero);
+      when(() => mockSleepTimerService.initialDuration).thenReturn(Duration.zero);
+      for (final listener in sleepTimerListeners) {
+        listener();
+      }
+      expect(
+        fakeMqttClient.publishedMessages
+            .where((m) => m.topic == 'absorb/kids_tablet/sleep_timer')
+            .length,
+        equals(count + 2),
+      );
+    });
   });
 }
