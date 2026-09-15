@@ -213,11 +213,11 @@ class MqttRemoteService {
   String get sleepTimerSetTopic => 'absorb/$_slug/sleep_timer/set';
   String get playMediaTopic => 'absorb/$_slug/play_media/set';
   String get discoveryMediaPlayerTopic =>
-      'homeassistant/media_player/$_slug/config';
+      'homeassistant/media_player/absorb_$_slug/config';
   String get discoverySleepTimerSensorTopic =>
-      'homeassistant/sensor/${_slug}_sleep_timer/config';
+      'homeassistant/sensor/absorb_${_slug}_sleep_timer/config';
   String get discoverySleepChapterButtonTopic =>
-      'homeassistant/button/${_slug}_sleep_chapter/config';
+      'homeassistant/button/absorb_${_slug}_sleep_chapter/config';
 
   static String sanitizeSlug(String rawSlug) {
     final sanitized = rawSlug.trim().replaceAll(RegExp(r'[^a-zA-Z0-9_-]'), '_');
@@ -296,12 +296,22 @@ class MqttRemoteService {
   }
 
   Map<String, dynamic> buildDeviceMetadata() {
+    final model = ApiService.deviceModel.isNotEmpty
+        ? ApiService.deviceModel
+        : 'Absorb Client';
+    final manufacturer = ApiService.deviceManufacturer.isNotEmpty
+        ? ApiService.deviceManufacturer
+        : 'Absorb';
+    final swVersion = ApiService.appVersionFull.isNotEmpty
+        ? ApiService.appVersionFull
+        : '1.0.0';
+
     return {
       'identifiers': ['absorb_$_slug'],
       'name': 'Absorb ($_slug)',
-      'model': 'Galaxy Tab A7 Lite (SM-T220)',
-      'manufacturer': 'Samsung',
-      'sw_version': ApiService.appVersionFull,
+      'model': model,
+      'manufacturer': manufacturer,
+      'sw_version': swVersion,
     };
   }
 
@@ -318,6 +328,11 @@ class MqttRemoteService {
       'availability_topic': statusTopic,
       'payload_available': 'online',
       'payload_not_available': 'offline',
+      'payload_play': 'PLAY',
+      'payload_pause': 'PAUSE',
+      'payload_stop': 'STOP',
+      'payload_next_track': 'NEXT_CHAPTER',
+      'payload_previous_track': 'PREV_CHAPTER',
       'supported_features': [
         'play',
         'pause',
@@ -387,6 +402,8 @@ class MqttRemoteService {
         await _audioPlayerService.play(fromUi: false);
       } else if (command == 'PAUSE') {
         await _audioPlayerService.pause();
+      } else if (command == 'STOP') {
+        await _audioPlayerService.stop();
       } else if (command == 'SKIP_FORWARD') {
         final skipSec = await PlayerSettings.getForwardSkip();
         await _audioPlayerService.skipForward(skipSec);
@@ -395,9 +412,9 @@ class MqttRemoteService {
         final skipSec = await PlayerSettings.getBackSkip();
         await _audioPlayerService.skipBackward(skipSec);
         _publishState();
-      } else if (command == 'NEXT_CHAPTER') {
+      } else if (command == 'NEXT_CHAPTER' || command == 'NEXT') {
         await _audioPlayerService.skipToNextChapter();
-      } else if (command == 'PREV_CHAPTER') {
+      } else if (command == 'PREV_CHAPTER' || command == 'PREVIOUS') {
         await _audioPlayerService.skipToPreviousChapter();
       }
     } else if (topic == seekTopic) {
