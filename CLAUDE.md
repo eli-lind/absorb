@@ -17,3 +17,7 @@ Single-context layout (`CONTEXT.md` at root + `docs/adr/`). See `docs/agents/dom
 ### Memory
 
 Repo-local Markdown entries staged in `docs/agents/memory/`. See `docs/agents/memory.md`.
+
+## Standing Permissions
+- Standing merge authorization is granted: agents may self-merge PRs once tests and `code-review` pass.
+
