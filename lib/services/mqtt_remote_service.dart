@@ -192,6 +192,9 @@ enum MqttConnectionStatus {
 }
 
 class MqttRemoteService extends ChangeNotifier {
+  static const double minSpeed = 0.5;
+  static const double maxSpeed = 3.0;
+
   static final MqttRemoteService _instance = MqttRemoteService._();
   factory MqttRemoteService() => _instance;
   MqttRemoteService._({
@@ -339,6 +342,7 @@ class MqttRemoteService extends ChangeNotifier {
   String get stateTopic => 'absorb/$_slug/state';
   String get seekTopic => 'absorb/$_slug/seek/set';
   String get volumeTopic => 'absorb/$_slug/volume/set';
+  String get speedTopic => 'absorb/$_slug/speed/set';
   String get sleepTimerTopic => 'absorb/$_slug/sleep_timer';
   String get sleepTimerSetTopic => 'absorb/$_slug/sleep_timer/set';
   String get playMediaTopic => 'absorb/$_slug/play_media/set';
@@ -516,6 +520,7 @@ class MqttRemoteService extends ChangeNotifier {
       _clientAdapter.subscribe(commandTopic);
       _clientAdapter.subscribe(seekTopic);
       _clientAdapter.subscribe(volumeTopic);
+      _clientAdapter.subscribe(speedTopic);
       _clientAdapter.subscribe(sleepTimerSetTopic);
       _clientAdapter.subscribe(playMediaTopic);
 
@@ -676,6 +681,13 @@ class MqttRemoteService extends ChangeNotifier {
         await _audioPlayerService.skipToNextChapter();
       } else if (command == 'PREV_CHAPTER' || command == 'PREVIOUS') {
         await _audioPlayerService.skipToPreviousChapter();
+      } else if (command == 'PLAY_PAUSE') {
+        if (_audioPlayerService.isPlaying) {
+          await _audioPlayerService.pause();
+        } else {
+          await _audioPlayerService.play(fromUi: false);
+        }
+        _publishState();
       }
     } else if (topic == seekTopic) {
       final seconds = num.tryParse(payload.trim())?.toDouble();
@@ -691,6 +703,13 @@ class MqttRemoteService extends ChangeNotifier {
         final targetVol =
             val > 1.0 ? (val / 100.0).clamp(0.0, 1.0) : val.clamp(0.0, 1.0);
         await _audioPlayerService.setVolume(targetVol);
+        _publishState();
+      }
+    } else if (topic == speedTopic) {
+      final speed = num.tryParse(payload.trim())?.toDouble();
+      if (speed != null) {
+        final clampedSpeed = speed.clamp(minSpeed, maxSpeed);
+        await _audioPlayerService.setSpeed(clampedSpeed);
         _publishState();
       }
     } else if (topic == sleepTimerSetTopic) {
