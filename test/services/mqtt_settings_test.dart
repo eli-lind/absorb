@@ -49,6 +49,7 @@ class FakeMqttClientAdapter implements MqttClientAdapter {
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+  final defaultSlugPattern = RegExp(r'^absorb_[0-9a-f]{4}$');
 
   setUp(() {
     SharedPreferences.setMockInitialValues({});
@@ -62,15 +63,70 @@ void main() {
   });
 
   group('MqttSettings', () {
+
     test('defaults match specifications', () async {
       expect(await MqttSettings.isEnabled(), isFalse);
       expect(await MqttSettings.getHost(), isEmpty);
       expect(await MqttSettings.getPort(), equals(1883));
       expect(await MqttSettings.getUsername(), isEmpty);
       expect(await MqttSettings.getPassword(), isEmpty);
-      expect(await MqttSettings.getSlug(), equals('absorb'));
+      expect(await MqttSettings.getSlug(), matches(defaultSlugPattern));
       expect(await MqttSettings.isDiscoveryEnabled(), isTrue);
       expect(await MqttSettings.useTls(), isFalse);
+    });
+
+    test('generates unique 4-hex slug and persists immediately when unset', () async {
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.containsKey(MqttSettings.keySlug), isFalse);
+
+      final slug1 = await MqttSettings.getSlug();
+      expect(slug1, matches(defaultSlugPattern));
+      expect(prefs.getString(MqttSettings.keySlug), equals(slug1));
+
+      // Subsequent calls return the identical persisted slug
+      final slug2 = await MqttSettings.getSlug();
+      expect(slug2, equals(slug1));
+    });
+
+    test('concurrent getSlug calls resolve to identical generated slug without race', () async {
+      final results = await Future.wait([
+        MqttSettings.getSlug(),
+        MqttSettings.getSlug(),
+        MqttSettings.getSlug(),
+      ]);
+
+      expect(results[0], matches(defaultSlugPattern));
+      expect(results[1], equals(results[0]));
+      expect(results[2], equals(results[0]));
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.getString(MqttSettings.keySlug), equals(results[0]));
+    });
+
+    test('generates and persists unique 4-hex slug when existing slug is empty', () async {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(MqttSettings.keySlug, '');
+
+      final slug = await MqttSettings.getSlug();
+      expect(slug, matches(defaultSlugPattern));
+      expect(prefs.getString(MqttSettings.keySlug), equals(slug));
+    });
+
+    test('preserves pre-existing legacy absorb slug unchanged', () async {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(MqttSettings.keySlug, 'absorb');
+
+      final slug = await MqttSettings.getSlug();
+      expect(slug, equals('absorb'));
+      expect(prefs.getString(MqttSettings.keySlug), equals('absorb'));
+    });
+
+    test('preserves pre-existing custom slug unchanged', () async {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(MqttSettings.keySlug, 'bedroom_tablet');
+
+      final slug = await MqttSettings.getSlug();
+      expect(slug, equals('bedroom_tablet'));
+      expect(prefs.getString(MqttSettings.keySlug), equals('bedroom_tablet'));
     });
 
     test('persists and retrieves all settings', () async {
@@ -395,6 +451,52 @@ void main() {
       expect(await MqttSettings.getHost(), equals('192.168.1.88'));
       expect(await MqttSettings.getSlug(), equals('my_new_slug'));
       expect(testService.connectionStatus, equals(MqttConnectionStatus.connected));
+    });
+
+    testWidgets('populates slug field with auto-generated slug on clean launch and saves modifications', (tester) async {
+      tester.view.physicalSize = const Size(1200, 1800);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(() {
+        tester.view.resetPhysicalSize();
+        tester.view.resetDevicePixelRatio();
+      });
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: MqttSettingsScreen(mqttService: testService),
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+
+      final slugFinder = find.widgetWithText(TextFormField, 'Device Slug');
+      expect(slugFinder, findsOneWidget);
+      final slugFormField = tester.widget<TextFormField>(slugFinder);
+      final initialSlug = slugFormField.controller!.text;
+      expect(initialSlug, matches(defaultSlugPattern));
+
+      // Auto-generated slug is persisted
+      expect(await MqttSettings.getSlug(), equals(initialSlug));
+
+      // Enable and modify slug
+      await tester.tap(find.text('Enable Remote Control'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+
+      await tester.enterText(find.widgetWithText(TextFormField, 'Broker Host or IP'), '10.0.0.2');
+      await tester.enterText(slugFinder, 'modified_tablet');
+      await tester.pump();
+
+      final saveBtn = find.widgetWithText(FilledButton, 'Save & Connect');
+      await tester.ensureVisible(saveBtn);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+      await tester.tap(saveBtn);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+      await tester.pump(const Duration(seconds: 4));
+
+      expect(await MqttSettings.getSlug(), equals('modified_tablet'));
     });
   });
 }

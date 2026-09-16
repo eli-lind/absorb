@@ -1,3 +1,4 @@
+import 'dart:math';
 import 'package:shared_preferences/shared_preferences.dart';
 
 /// Manages persistence of MQTT remote control configuration across accounts.
@@ -15,7 +16,6 @@ class MqttSettings {
   static const defaultPort = 1883;
   static const defaultTlsPort = 8883;
   static const defaultDiscoveryEnabled = true;
-  static const defaultSlug = 'absorb';
 
   static const globalKeys = <String>{
     keyEnabled,
@@ -78,13 +78,32 @@ class MqttSettings {
     await prefs.setString(keyPassword, value);
   }
 
+  static Future<String>? _slugFuture;
+
   static Future<String> getSlug() async {
-    final prefs = await SharedPreferences.getInstance();
-    final slug = prefs.getString(keySlug) ?? '';
-    return slug.isNotEmpty ? slug : defaultSlug;
+    if (_slugFuture != null) return _slugFuture!;
+    return _slugFuture = _getOrGenerateSlug();
+  }
+
+  static Future<String> _getOrGenerateSlug() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final existing = prefs.getString(keySlug);
+      if (existing != null && existing.isNotEmpty) {
+        return existing;
+      }
+      final random = Random();
+      final suffix = random.nextInt(0x10000).toRadixString(16).padLeft(4, '0');
+      final generatedSlug = 'absorb_$suffix';
+      await prefs.setString(keySlug, generatedSlug);
+      return generatedSlug;
+    } finally {
+      _slugFuture = null;
+    }
   }
 
   static Future<void> setSlug(String value) async {
+    _slugFuture = null;
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(keySlug, value.trim());
   }
