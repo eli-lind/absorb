@@ -1047,9 +1047,12 @@ class BackupService {
     }
 
     // MQTT Remote Control settings (GLOBAL)
+    // Fleet provisioning guardrail: device slug is device-local and preserved across restores.
     final mqttData = data['mqtt'] as Map<String, dynamic>?;
     if (mqttData != null) {
-      await MqttSettings.fromMap(mqttData);
+      final sanitizedMqtt =
+          Map<String, dynamic>.from(mqttData)..remove(MqttSettings.fieldSlug);
+      await MqttSettings.fromMap(sanitizedMqtt);
       if (await MqttSettings.isEnabled()) {
         unawaited(MqttRemoteService().connectFromSettings());
       }

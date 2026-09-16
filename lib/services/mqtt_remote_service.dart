@@ -220,8 +220,13 @@ class MqttRemoteService extends ChangeNotifier {
     '2.0x',
   ];
 
-  static final MqttRemoteService _instance = MqttRemoteService._();
+  static MqttRemoteService _instance = MqttRemoteService._();
   factory MqttRemoteService() => _instance;
+
+  @visibleForTesting
+  static void setMockInstance(MqttRemoteService? instance) {
+    _instance = instance ?? MqttRemoteService._();
+  }
   MqttRemoteService._({
     Stream<List<ConnectivityResult>>? connectivityStream,
   })  : _audioPlayerService = AudioPlayerService(),
