@@ -353,6 +353,7 @@ class MqttRemoteService extends ChangeNotifier {
   bool _isExplicitlyDisconnected = false;
   bool _isPlayerListenerAttached = false;
   bool _isSleepTimerListenerAttached = false;
+  bool _isDownloadListenerAttached = false;
   _PlayerSnapshot? _lastSnapshot;
   _SleepTimerSnapshot? _lastSleepSnapshot;
 
@@ -368,6 +369,7 @@ class MqttRemoteService extends ChangeNotifier {
   String get seekTopic => 'absorb/$_slug/seek/set';
   String get volumeTopic => 'absorb/$_slug/volume/set';
   String get speedTopic => 'absorb/$_slug/speed/set';
+  String get downloadedItemsTopic => 'absorb/$_slug/downloaded_items';
   String get sleepTimerTopic => 'absorb/$_slug/sleep_timer';
   String get sleepTimerSetTopic => 'absorb/$_slug/sleep_timer/set';
   String get sleepTimerDurationSetTopic =>
@@ -431,6 +433,10 @@ class MqttRemoteService extends ChangeNotifier {
     if (_isSleepTimerListenerAttached) {
       _sleepTimerService.removeListener(onSleepTimerChanged);
       _isSleepTimerListenerAttached = false;
+    }
+    if (_isDownloadListenerAttached) {
+      _downloadService.removeListener(onDownloadedItemsChanged);
+      _isDownloadListenerAttached = false;
     }
     _lastSnapshot = null;
     _lastSleepSnapshot = null;
@@ -581,9 +587,16 @@ class MqttRemoteService extends ChangeNotifier {
         _isSleepTimerListenerAttached = true;
       }
 
+      // Attach listener for downloaded items changes
+      if (!_isDownloadListenerAttached) {
+        _downloadService.addListener(onDownloadedItemsChanged);
+        _isDownloadListenerAttached = true;
+      }
+
       // Initial state publish
       onPlayerStateChanged(force: true);
       onSleepTimerChanged(force: true);
+      onDownloadedItemsChanged();
 
       if (enableDiscovery) {
         publishDiscovery();
@@ -684,8 +697,11 @@ class MqttRemoteService extends ChangeNotifier {
   Map<String, dynamic> buildSleepTimerNumberDiscoveryPayload() {
     return {
       'name': 'Absorb ($_slug) Sleep Timer Duration',
-      'unique_id': 'absorb_${_slug}_sleep_timer',
+      'unique_id': 'absorb_${_slug}_sleep_timer_duration',
       'command_topic': sleepTimerDurationSetTopic,
+      'state_topic': sleepTimerTopic,
+      'value_template':
+          '{{ (value_json.remaining_seconds / 60) | round(0) if value_json.active else 0 }}',
       'min': minSleepDurationMinutes,
       'max': maxSleepDurationMinutes,
       'step': stepSleepDurationMinutes,
@@ -704,6 +720,9 @@ class MqttRemoteService extends ChangeNotifier {
       'name': 'Absorb ($_slug) Sleep Timer Preset',
       'unique_id': 'absorb_${_slug}_sleep_timer_preset',
       'command_topic': sleepTimerPresetSetTopic,
+      'state_topic': sleepTimerTopic,
+      'value_template':
+          "{{ 'end_of_chapter' if value_json.mode == 'end_of_chapter' else ((value_json.initial_minutes | string + 'm') if value_json.active else 'off') }}",
       'options': sleepTimerPresets,
       'icon': 'mdi:timer-cog-outline',
       'availability_topic': statusTopic,
@@ -718,6 +737,8 @@ class MqttRemoteService extends ChangeNotifier {
       'name': 'Absorb ($_slug) Playback Speed',
       'unique_id': 'absorb_${_slug}_speed',
       'command_topic': speedSelectSetTopic,
+      'state_topic': stateTopic,
+      'value_template': "{{ value_json.speed | string + 'x' }}",
       'options': speedOptions,
       'icon': 'mdi:play-speed',
       'availability_topic': statusTopic,
@@ -1120,6 +1141,38 @@ class MqttRemoteService extends ChangeNotifier {
       final encoded = jsonEncode(payload);
       _clientAdapter.publish(sleepTimerTopic, encoded, retain: true);
     }
+  }
+
+  List<Map<String, dynamic>> buildDownloadedItemsPayload() {
+    final items = _downloadService.downloadedItems;
+    return items.map((dl) {
+      String itemId = dl.itemId;
+      String? episodeId;
+      if (dl.sessionData != null) {
+        try {
+          final session = jsonDecode(dl.sessionData!) as Map<String, dynamic>;
+          if (session['episodeId'] is String) {
+            episodeId = session['episodeId'] as String;
+          }
+        } catch (_) {}
+      }
+      if (episodeId == null && itemId.length > 36 && itemId[36] == '-') {
+        episodeId = itemId.substring(37);
+        itemId = itemId.substring(0, 36);
+      }
+      return {
+        'item_id': itemId,
+        if (episodeId != null) 'episode_id': episodeId,
+        'title': dl.title ?? '',
+        'author': dl.author ?? '',
+        if (dl.coverUrl != null) 'cover_url': dl.coverUrl,
+      };
+    }).toList();
+  }
+
+  void onDownloadedItemsChanged() {
+    final payload = jsonEncode(buildDownloadedItemsPayload());
+    _clientAdapter.publish(downloadedItemsTopic, payload, retain: true);
   }
 
   Map<String, dynamic> buildStatePayload() {

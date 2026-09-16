@@ -1967,8 +1967,13 @@ void main() {
 
       final payload = jsonDecode(discoveryMsg.payload) as Map<String, dynamic>;
       expect(payload['name'], equals('Absorb (kids_tablet) Sleep Timer Duration'));
-      expect(payload['unique_id'], equals('absorb_kids_tablet_sleep_timer'));
+      expect(payload['unique_id'], equals('absorb_kids_tablet_sleep_timer_duration'));
       expect(payload['command_topic'], equals('absorb/kids_tablet/sleep_timer/duration/set'));
+      expect(payload['state_topic'], equals('absorb/kids_tablet/sleep_timer'));
+      expect(
+        payload['value_template'],
+        equals('{{ (value_json.remaining_seconds / 60) | round(0) if value_json.active else 0 }}'),
+      );
       expect(payload['min'], equals(0));
       expect(payload['max'], equals(120));
       expect(payload['step'], equals(5));
@@ -2150,6 +2155,11 @@ void main() {
       expect(payload['name'], equals('Absorb (kids_tablet) Sleep Timer Preset'));
       expect(payload['unique_id'], equals('absorb_kids_tablet_sleep_timer_preset'));
       expect(payload['command_topic'], equals('absorb/kids_tablet/sleep_timer_preset/set'));
+      expect(payload['state_topic'], equals('absorb/kids_tablet/sleep_timer'));
+      expect(
+        payload['value_template'],
+        equals("{{ 'end_of_chapter' if value_json.mode == 'end_of_chapter' else ((value_json.initial_minutes | string + 'm') if value_json.active else 'off') }}"),
+      );
       expect(payload['options'], equals(['off', '15m', '30m', '45m', '60m', 'end_of_chapter']));
       expect(payload['icon'], equals('mdi:timer-cog-outline'));
       expect(payload['availability_topic'], equals('absorb/kids_tablet/status'));
@@ -2329,6 +2339,8 @@ void main() {
       expect(payload['name'], equals('Absorb (kids_tablet) Playback Speed'));
       expect(payload['unique_id'], equals('absorb_kids_tablet_speed'));
       expect(payload['command_topic'], equals('absorb/kids_tablet/speed/select/set'));
+      expect(payload['state_topic'], equals('absorb/kids_tablet/state'));
+      expect(payload['value_template'], equals("{{ value_json.speed | string + 'x' }}"));
       expect(payload['options'], equals(['0.75x', '1.0x', '1.25x', '1.5x', '2.0x']));
       expect(payload['icon'], equals('mdi:play-speed'));
       expect(payload['availability_topic'], equals('absorb/kids_tablet/status'));
@@ -2432,6 +2444,147 @@ void main() {
             m.payload.isEmpty,
       );
       expect(unpublishedSelect.retain, isTrue);
+    });
+  });
+
+  group('MqttRemoteService Ticket #37: Downloaded Library Index Telemetry', () {
+    late MockAudioPlayerService mockAudioPlayerService;
+    late MockDownloadService mockDownloadService;
+    late FakeMqttClientAdapter fakeMqttClient;
+    late MqttRemoteService service;
+    late List<VoidCallback> downloadListeners;
+
+    setUp(() async {
+      SharedPreferences.setMockInitialValues({
+        'mqtt_enabled': true,
+        'mqtt_host': '192.168.1.50',
+        'mqtt_port': 1883,
+        'mqtt_slug': 'kids_tablet',
+      });
+      await SharedPreferences.getInstance();
+      mockAudioPlayerService = MockAudioPlayerService();
+      mockDownloadService = MockDownloadService();
+      fakeMqttClient = FakeMqttClientAdapter();
+      downloadListeners = [];
+
+      when(() => mockAudioPlayerService.isPlaying).thenReturn(false);
+      when(() => mockAudioPlayerService.nowPlayingTitle).thenReturn('');
+      when(() => mockAudioPlayerService.currentTitle).thenReturn('');
+      when(() => mockAudioPlayerService.currentAuthor).thenReturn('');
+      when(() => mockAudioPlayerService.currentCoverUrl).thenReturn(null);
+      when(() => mockAudioPlayerService.totalDuration).thenReturn(0.0);
+      when(() => mockAudioPlayerService.position).thenReturn(Duration.zero);
+      when(() => mockAudioPlayerService.volume).thenReturn(1.0);
+      when(() => mockAudioPlayerService.speed).thenReturn(1.0);
+      when(() => mockAudioPlayerService.chapters).thenReturn([]);
+      when(() => mockAudioPlayerService.currentChapter).thenReturn(null);
+
+      when(() => mockDownloadService.downloadedItems).thenReturn([
+        DownloadInfo(
+          itemId: 'item-book-1',
+          status: DownloadStatus.downloaded,
+          title: 'Frog and Toad',
+          author: 'Arnold Lobel',
+          coverUrl: 'http://example.com/cover1.jpg',
+        ),
+        DownloadInfo(
+          itemId: 'show-uuid-1-ep-99',
+          status: DownloadStatus.downloaded,
+          title: 'Episode 99',
+          author: 'Podcast Show',
+          sessionData: jsonEncode({'episodeId': 'ep-99'}),
+        ),
+      ]);
+      when(() => mockDownloadService.addListener(any())).thenAnswer((inv) {
+        final listener = inv.positionalArguments[0] as VoidCallback;
+        downloadListeners.add(listener);
+      });
+      when(() => mockDownloadService.removeListener(any())).thenAnswer((inv) {
+        final listener = inv.positionalArguments[0] as VoidCallback;
+        downloadListeners.remove(listener);
+      });
+
+      service = MqttRemoteService.forTesting(
+        audioPlayerService: mockAudioPlayerService,
+        downloadService: mockDownloadService,
+        clientAdapter: fakeMqttClient,
+        enableJitter: false,
+      );
+    });
+
+    tearDown(() {
+      service.dispose();
+      fakeMqttClient.dispose();
+    });
+
+    test('publishes retained downloaded library items payload upon connect', () async {
+      await service.connect(
+        host: '192.168.1.50',
+        slug: 'kids_tablet',
+      );
+
+      final dlMsg = fakeMqttClient.publishedMessages.firstWhere(
+        (m) => m.topic == 'absorb/kids_tablet/downloaded_items',
+      );
+      expect(dlMsg.retain, isTrue);
+
+      final items = (jsonDecode(dlMsg.payload) as List<dynamic>).cast<Map<String, dynamic>>();
+      expect(items.length, equals(2));
+
+      expect(items[0]['item_id'], equals('item-book-1'));
+      expect(items[0]['title'], equals('Frog and Toad'));
+      expect(items[0]['author'], equals('Arnold Lobel'));
+      expect(items[0]['cover_url'], equals('http://example.com/cover1.jpg'));
+      expect(items[0].containsKey('episode_id'), isFalse);
+
+      expect(items[1]['item_id'], equals('show-uuid-1-ep-99'));
+      expect(items[1]['episode_id'], equals('ep-99'));
+      expect(items[1]['title'], equals('Episode 99'));
+      expect(items[1]['author'], equals('Podcast Show'));
+    });
+
+    test('publishes updated retained downloaded items when DownloadService notifies listeners', () async {
+      await service.connect(
+        host: '192.168.1.50',
+        slug: 'kids_tablet',
+      );
+
+      expect(downloadListeners, isNotEmpty);
+
+      // Update mock download items
+      when(() => mockDownloadService.downloadedItems).thenReturn([
+        DownloadInfo(
+          itemId: 'item-book-2',
+          status: DownloadStatus.downloaded,
+          title: 'Charlotte\'s Web',
+          author: 'E.B. White',
+        ),
+      ]);
+
+      // Fire listener
+      for (final listener in downloadListeners) {
+        listener();
+      }
+
+      final updatedMessages = fakeMqttClient.publishedMessages
+          .where((m) => m.topic == 'absorb/kids_tablet/downloaded_items')
+          .toList();
+      expect(updatedMessages.length, greaterThanOrEqualTo(2));
+
+      final latest = jsonDecode(updatedMessages.last.payload) as List<dynamic>;
+      expect(latest.length, equals(1));
+      expect(latest[0]['title'], equals('Charlotte\'s Web'));
+    });
+
+    test('detaches download service listener on disconnect', () async {
+      await service.connect(
+        host: '192.168.1.50',
+        slug: 'kids_tablet',
+      );
+      expect(downloadListeners, isNotEmpty);
+
+      service.disconnect();
+      expect(downloadListeners, isEmpty);
     });
   });
 }

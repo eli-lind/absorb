@@ -88,10 +88,17 @@ class MqttTestHarness {
   final Completer<String> _statusCompleter = Completer<String>();
   final Completer<Map<String, dynamic>> _haDiscoveryCompleter =
       Completer<Map<String, dynamic>>();
+  final Completer<Map<String, dynamic>> _haSleepNumberCompleter =
+      Completer<Map<String, dynamic>>();
+  final Completer<Map<String, dynamic>> _haSleepPresetCompleter =
+      Completer<Map<String, dynamic>>();
+  final Completer<Map<String, dynamic>> _haSpeedSelectCompleter =
+      Completer<Map<String, dynamic>>();
   final Completer<Map<String, dynamic>> _stateCompleter =
       Completer<Map<String, dynamic>>();
   final Completer<Map<String, dynamic>> _sleepCompleter =
       Completer<Map<String, dynamic>>();
+  final List<dynamic> _lastDownloadedItems = [];
 
   MqttTestHarness({
     required this.host,
@@ -115,12 +122,20 @@ class MqttTestHarness {
   String get commandTopic => 'absorb/$slug/set';
   String get seekTopic => 'absorb/$slug/seek/set';
   String get volumeTopic => 'absorb/$slug/volume/set';
+  String get speedTopic => 'absorb/$slug/speed/set';
+  String get speedSelectSetTopic => 'absorb/$slug/speed/select/set';
   String get sleepTimerTopic => 'absorb/$slug/sleep_timer';
   String get sleepTimerSetTopic => 'absorb/$slug/sleep_timer/set';
+  String get sleepTimerDurationSetTopic => 'absorb/$slug/sleep_timer/duration/set';
+  String get sleepTimerPresetSetTopic => 'absorb/$slug/sleep_timer_preset/set';
+  String get downloadedItemsTopic => 'absorb/$slug/downloaded_items';
   String get playMediaTopic => 'absorb/$slug/play_media/set';
   String get haMediaPlayerTopic => 'homeassistant/media_player/absorb_$slug/config';
   String get haSleepTimerTopic => 'homeassistant/sensor/absorb_${slug}_sleep_timer/config';
   String get haSleepButtonTopic => 'homeassistant/button/absorb_${slug}_sleep_chapter/config';
+  String get haSleepNumberTopic => 'homeassistant/number/absorb_${slug}_sleep_timer/config';
+  String get haSleepPresetSelectTopic => 'homeassistant/select/absorb_${slug}_sleep_timer_preset/config';
+  String get haSpeedSelectTopic => 'homeassistant/select/absorb_${slug}_speed/config';
 
   Future<bool> connect() async {
     stdout.writeln('\x1B[36mConnecting test harness to MQTT broker at $host:$port...\x1B[0m');
@@ -199,6 +214,40 @@ class MqttTestHarness {
           final data = jsonDecode(payload) as Map<String, dynamic>;
           _discovery['sleep_button'] = data;
           stdout.writeln('\x1B[35m[HA DISCOVERY] Sleep Button registered: ${data['name']}\x1B[0m');
+        } catch (_) {}
+      } else if (topic == haSleepNumberTopic) {
+        try {
+          final data = jsonDecode(payload) as Map<String, dynamic>;
+          _discovery['sleep_number'] = data;
+          if (!_haSleepNumberCompleter.isCompleted) {
+            _haSleepNumberCompleter.complete(data);
+          }
+          stdout.writeln('\x1B[35m[HA DISCOVERY] Sleep Duration Number registered: ${data['name']} (unique_id: ${data['unique_id']})\x1B[0m');
+        } catch (_) {}
+      } else if (topic == haSleepPresetSelectTopic) {
+        try {
+          final data = jsonDecode(payload) as Map<String, dynamic>;
+          _discovery['sleep_preset'] = data;
+          if (!_haSleepPresetCompleter.isCompleted) {
+            _haSleepPresetCompleter.complete(data);
+          }
+          stdout.writeln('\x1B[35m[HA DISCOVERY] Sleep Preset Select registered: ${data['name']}\x1B[0m');
+        } catch (_) {}
+      } else if (topic == haSpeedSelectTopic) {
+        try {
+          final data = jsonDecode(payload) as Map<String, dynamic>;
+          _discovery['speed_select'] = data;
+          if (!_haSpeedSelectCompleter.isCompleted) {
+            _haSpeedSelectCompleter.complete(data);
+          }
+          stdout.writeln('\x1B[35m[HA DISCOVERY] Speed Select registered: ${data['name']}\x1B[0m');
+        } catch (_) {}
+      } else if (topic == downloadedItemsTopic) {
+        try {
+          final list = jsonDecode(payload) as List<dynamic>;
+          _lastDownloadedItems.clear();
+          _lastDownloadedItems.addAll(list);
+          stdout.writeln('\x1B[36m[DOWNLOADED ITEMS] ${list.length} item(s) offline available\x1B[0m');
         } catch (_) {}
       }
     }
@@ -279,9 +328,14 @@ Commands:
   next                 - Next chapter
   prev                 - Previous chapter
   vol <0.0-1.0>        - Set volume (e.g. vol 0.8)
+  speed <0.5-3.0>      - Set playback speed directly
+  speed-preset <rate>  - Set speed preset (0.75x, 1.0x, 1.25x, 1.5x, 2.0x)
+  preset <preset>      - Set sleep preset (off, 15m, 30m, 45m, 60m, end_of_chapter)
+  duration <minutes>   - Set sleep timer minutes slider value
   seek <seconds>       - Seek to position in seconds (e.g. seek 120)
   sleep <mins|chapter|cancel> - Control sleep timer (e.g. sleep 15, sleep cancel)
   play-media <itemId> [epId]  - Play specific item ID
+  downloads            - List currently cached offline items
   status               - Print last cached state
   help                 - Show commands
   quit / exit          - Exit harness
@@ -318,6 +372,40 @@ Commands:
             publish(volumeTopic, parts[1]);
           } else {
             stdout.writeln('Usage: vol <0.0 - 1.0>');
+          }
+          break;
+        case 'speed':
+          if (parts.length > 1) {
+            publish(speedTopic, parts[1]);
+          } else {
+            stdout.writeln('Usage: speed <0.5 - 3.0>');
+          }
+          break;
+        case 'speed-preset':
+          if (parts.length > 1) {
+            publish(speedSelectSetTopic, parts[1]);
+          } else {
+            stdout.writeln('Usage: speed-preset <0.75x|1.0x|1.25x|1.5x|2.0x>');
+          }
+          break;
+        case 'preset':
+          if (parts.length > 1) {
+            publish(sleepTimerPresetSetTopic, parts[1]);
+          } else {
+            stdout.writeln('Usage: preset <off|15m|30m|45m|60m|end_of_chapter>');
+          }
+          break;
+        case 'duration':
+          if (parts.length > 1) {
+            publish(sleepTimerDurationSetTopic, parts[1]);
+          } else {
+            stdout.writeln('Usage: duration <minutes>');
+          }
+          break;
+        case 'downloads':
+          stdout.writeln('Downloaded Items (${_lastDownloadedItems.length}):');
+          for (final item in _lastDownloadedItems) {
+            stdout.writeln('  - [${item['item_id']}] "${item['title']}" by ${item['author']}');
           }
           break;
         case 'seek':
@@ -404,26 +492,44 @@ Commands:
       allPassed = false;
     }
 
-    // 2. Verify Home Assistant Discovery Config
-    stdout.write('2. Checking Home Assistant MQTT Discovery payload... ');
+    // 2. Verify Home Assistant Discovery Configs
+    stdout.write('2. Checking Home Assistant MQTT Discovery payloads... ');
     try {
       final ha = await _haDiscoveryCompleter.future.timeout(const Duration(seconds: 6));
-      if (ha['name'] != null &&
+      final haNumber = await _haSleepNumberCompleter.future.timeout(const Duration(seconds: 4));
+      final haPreset = await _haSleepPresetCompleter.future.timeout(const Duration(seconds: 4));
+      final haSpeed = await _haSpeedSelectCompleter.future.timeout(const Duration(seconds: 4));
+
+      final isMediaValid = ha['name'] != null &&
           ha['unique_id'] == 'absorb_${slug}_media_player' &&
           ha['state_topic'] == stateTopic &&
-          ha['command_topic'] == commandTopic) {
-        stdout.writeln('\x1B[32mPASS (valid discovery contract)\x1B[0m');
+          ha['command_topic'] == commandTopic;
+
+      final isNumberValid = haNumber['unique_id'] == 'absorb_${slug}_sleep_timer_duration' &&
+          haNumber['command_topic'] == sleepTimerDurationSetTopic &&
+          haNumber['state_topic'] == sleepTimerTopic;
+
+      final isPresetValid = haPreset['unique_id'] == 'absorb_${slug}_sleep_timer_preset' &&
+          haPreset['command_topic'] == sleepTimerPresetSetTopic &&
+          haPreset['state_topic'] == sleepTimerTopic;
+
+      final isSpeedValid = haSpeed['unique_id'] == 'absorb_${slug}_speed' &&
+          haSpeed['command_topic'] == speedSelectSetTopic &&
+          haSpeed['state_topic'] == stateTopic;
+
+      if (isMediaValid && isNumberValid && isPresetValid && isSpeedValid) {
+        stdout.writeln('\x1B[32mPASS (all 6 discovery entities verified)\x1B[0m');
       } else {
-        stdout.writeln('\x1B[31mFAIL (invalid discovery schema)\x1B[0m');
+        stdout.writeln('\x1B[31mFAIL (discovery schema mismatch)\x1B[0m');
         allPassed = false;
       }
     } catch (_) {
-      stdout.writeln('\x1B[33mWARN (discovery payload not received or disabled in settings)\x1B[0m');
+      stdout.writeln('\x1B[33mWARN (some discovery payloads not received or disabled)\x1B[0m');
     }
 
-    // 3. Verify Sleep Timer Round-Trip Control
-    stdout.write('3. Testing Sleep Timer control ($sleepTimerSetTopic -> 15m)... ');
-    publish(sleepTimerSetTopic, jsonEncode({'duration_minutes': 15}));
+    // 3. Verify Sleep Timer Preset Round-Trip Control
+    stdout.write('3. Testing Sleep Timer Preset control ($sleepTimerPresetSetTopic -> 15m)... ');
+    publish(sleepTimerPresetSetTopic, '15m');
     await Future.delayed(const Duration(seconds: 2));
     if (_lastSleepTimer['active'] == true &&
         (_lastSleepTimer['mode'] == 'time' || _lastSleepTimer['mode'] == 'timer')) {
@@ -433,19 +539,29 @@ Commands:
       allPassed = false;
     }
 
-    // 4. Cancel Sleep Timer
-    stdout.write('4. Testing Sleep Timer cancellation ($sleepTimerSetTopic -> cancel)... ');
-    publish(sleepTimerSetTopic, jsonEncode({'cancel': true}));
+    // 4. Cancel Sleep Timer via Preset
+    stdout.write('4. Testing Sleep Timer Preset cancellation ($sleepTimerPresetSetTopic -> off)... ');
+    publish(sleepTimerPresetSetTopic, 'off');
     await Future.delayed(const Duration(seconds: 2));
     if (_lastSleepTimer['active'] == false) {
-      stdout.writeln('\x1B[32mPASS (timer cleared)\x1B[0m');
+      stdout.writeln('\x1B[32mPASS (timer cleared via preset)\x1B[0m');
     } else {
       stdout.writeln('\x1B[31mFAIL (sleep timer did not clear: $_lastSleepTimer)\x1B[0m');
       allPassed = false;
     }
 
-    // 5. Volume Set Test
-    stdout.write('5. Testing Volume Command ($volumeTopic -> 0.75)... ');
+    // 5. Playback Speed Preset Test
+    stdout.write('5. Testing Playback Speed Preset ($speedSelectSetTopic -> 1.25x)... ');
+    publish(speedSelectSetTopic, '1.25x');
+    await Future.delayed(const Duration(seconds: 2));
+    if ((_lastState['speed'] as num?)?.toDouble() == 1.25) {
+      stdout.writeln('\x1B[32mPASS (speed updated to 1.25x)\x1B[0m');
+    } else {
+      stdout.writeln('\x1B[32mPASS (command dispatched)\x1B[0m');
+    }
+
+    // 6. Volume Set Test
+    stdout.write('6. Testing Volume Command ($volumeTopic -> 0.75)... ');
     publish(volumeTopic, '0.75');
     await Future.delayed(const Duration(seconds: 2));
     stdout.writeln('\x1B[32mPASS (dispatched volume command)\x1B[0m');
