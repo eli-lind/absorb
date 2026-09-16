@@ -27,3 +27,11 @@ _Avoid_: Device name, friendly name, client ID
 **Throttled Heartbeat**:
 The periodic 10-second position telemetry emitted during active playback to prevent radio churn.
 _Avoid_: Polling rate, update frequency, stream tick
+
+**Software Volume Attenuation**:
+Player-level gain scaling applied by `AudioPlayerService` (`0.0` to `1.0`) independently of host OS hardware media stream volume.
+_Avoid_: Hardware volume, system volume, master volume
+
+**Inline Volume Slider**:
+An opt-in card-level continuous volume control widget positioned directly between transport controls and the action button grid, designed for kiosk and wall mounts.
+_Avoid_: Persistent slider, kiosk volume, card volume bar
