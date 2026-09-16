@@ -17,11 +17,11 @@ A discrete Home Assistant entity (sensor or button) reflecting Absorb's sleep co
 _Avoid_: Bedtime switch, timer helper
 
 **Fleet Provisioning**:
-The mechanism for distributing MQTT configuration across multiple tablets via `.absorb` backup/restore archives.
+The mechanism for distributing shared MQTT broker settings across multiple tablets via `.absorb` backup/restore archives while keeping device identity local.
 _Avoid_: Bulk enrollment, MDM push, build-time config
 
 **Device Identifier Slug**:
-A sanitized alphanumeric string used as the MQTT topic token and Home Assistant object ID.
+A sanitized alphanumeric string used as the MQTT topic token and Home Assistant object ID, uniquely generated per installation (`absorb_<hex>`) and preserved across backup restores.
 _Avoid_: Device name, friendly name, client ID
 
 **Throttled Heartbeat**:
