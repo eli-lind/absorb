@@ -75,11 +75,11 @@ No defects or unhandled regressions remain. The following intentionally parked d
 
 - **Run MQTT CLI Harness**:
   ```bash
-  # Smoke test mode against live broker
-  dart bin/mqtt_harness.dart --host <broker-host> --slug <device-slug> --smoke
+  # Smoke test mode against live broker (requires running app/emulator)
+  dart run tool/mqtt_harness.dart --host <broker-host> --slug <device-slug> --smoke
 
   # Interactive shell mode
-  dart bin/mqtt_harness.dart --host <broker-host> --slug <device-slug>
+  dart run tool/mqtt_harness.dart --host <broker-host> --slug <device-slug>
   ```
 
 ---
