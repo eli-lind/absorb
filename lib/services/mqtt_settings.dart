@@ -13,6 +13,8 @@ class MqttSettings {
   static const keyDiscoveryEnabled = 'mqtt_discovery_enabled';
   static const keyUseTls = 'mqtt_use_tls';
 
+  static const fieldSlug = 'slug';
+
   static const defaultPort = 1883;
   static const defaultTlsPort = 8883;
   static const defaultDiscoveryEnabled = true;

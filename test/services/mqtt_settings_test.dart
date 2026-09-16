@@ -227,7 +227,9 @@ void main() {
       expect(mqttMap['slug'], equals('tablet_a7'));
     });
 
-    test('importSettings restores mqtt configuration', () async {
+    test('importSettings restores mqtt configuration while preserving device-local slug', () async {
+      await MqttSettings.setSlug('existing_local_tablet');
+
       final backupData = <String, dynamic>{
         'version': 3,
         'settings': <String, dynamic>{},
@@ -250,9 +252,129 @@ void main() {
       expect(await MqttSettings.getPort(), equals(8883));
       expect(await MqttSettings.getUsername(), equals('backup_user'));
       expect(await MqttSettings.getPassword(), equals('backup_password'));
-      expect(await MqttSettings.getSlug(), equals('fleet_tablet_01'));
+      expect(await MqttSettings.getSlug(), equals('existing_local_tablet'));
       expect(await MqttSettings.isDiscoveryEnabled(), isFalse);
       expect(await MqttSettings.useTls(), isTrue);
+    });
+
+    test('importSettings on clean device does not import foreign slug and preserves local slug generation', () async {
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.containsKey(MqttSettings.keySlug), isFalse);
+
+      final backupData = <String, dynamic>{
+        'version': 3,
+        'settings': <String, dynamic>{},
+        'mqtt': <String, dynamic>{
+          'enabled': true,
+          'host': '192.168.0.10',
+          'port': 1883,
+          'username': 'fleet_user',
+          'password': 'fleet_password',
+          'slug': 'tablet_source_device',
+          'discoveryEnabled': true,
+          'useTls': false,
+        },
+      };
+
+      await BackupService.importSettings(backupData);
+
+      expect(prefs.getString(MqttSettings.keySlug), isNot(equals('tablet_source_device')));
+      final localSlug = await MqttSettings.getSlug();
+      expect(localSlug, matches(defaultSlugPattern));
+      expect(localSlug, isNot(equals('tablet_source_device')));
+    });
+
+    test('fleet provisioning simulation: backup export from tablet A cloned to tablets B and C isolates device slugs', () async {
+      // 1. Tablet A setup & export
+      SharedPreferences.setMockInitialValues({});
+      await MqttSettings.setEnabled(true);
+      await MqttSettings.setHost('192.168.1.50');
+      await MqttSettings.setPort(1883);
+      await MqttSettings.setUsername('fleet_admin');
+      await MqttSettings.setPassword('supersecret');
+      await MqttSettings.setSlug('tablet_master');
+      await MqttSettings.setDiscoveryEnabled(true);
+      await MqttSettings.setUseTls(false);
+
+      final tabletABackup = await BackupService.exportSettings(includeAccounts: false);
+      expect(tabletABackup['mqtt']['slug'], equals('tablet_master'));
+
+      // 2. Tablet B (pre-existing custom slug) restores Tablet A backup
+      SharedPreferences.setMockInitialValues({
+        MqttSettings.keySlug: 'kids_tablet_b',
+      });
+      await BackupService.importSettings(tabletABackup);
+
+      expect(await MqttSettings.getHost(), equals('192.168.1.50'));
+      expect(await MqttSettings.getUsername(), equals('fleet_admin'));
+      expect(await MqttSettings.getSlug(), equals('kids_tablet_b'));
+
+      // 3. Tablet C (clean install) restores Tablet A backup
+      SharedPreferences.setMockInitialValues({});
+      await BackupService.importSettings(tabletABackup);
+
+      expect(await MqttSettings.getHost(), equals('192.168.1.50'));
+      expect(await MqttSettings.getUsername(), equals('fleet_admin'));
+      final tabletCSlug = await MqttSettings.getSlug();
+      expect(tabletCSlug, matches(defaultSlugPattern));
+      expect(tabletCSlug, isNot(equals('tablet_master')));
+      expect(tabletCSlug, isNot(equals('kids_tablet_b')));
+    });
+
+    test('importSettings triggers connectFromSettings with device-local slug when enabled is true', () async {
+      final mockAudioPlayer = MockAudioPlayerService();
+      final fakeMqttClient = FakeMqttClientAdapter();
+
+      when(() => mockAudioPlayer.isPlaying).thenReturn(false);
+      when(() => mockAudioPlayer.nowPlayingTitle).thenReturn('');
+      when(() => mockAudioPlayer.currentTitle).thenReturn('');
+      when(() => mockAudioPlayer.currentAuthor).thenReturn('');
+      when(() => mockAudioPlayer.currentCoverUrl).thenReturn(null);
+      when(() => mockAudioPlayer.totalDuration).thenReturn(0.0);
+      when(() => mockAudioPlayer.position).thenReturn(Duration.zero);
+      when(() => mockAudioPlayer.volume).thenReturn(1.0);
+      when(() => mockAudioPlayer.speed).thenReturn(1.0);
+      when(() => mockAudioPlayer.chapters).thenReturn([]);
+      when(() => mockAudioPlayer.currentChapter).thenReturn(null);
+
+      final testService = MqttRemoteService.forTesting(
+        audioPlayerService: mockAudioPlayer,
+        clientAdapter: fakeMqttClient,
+      );
+      MqttRemoteService.setMockInstance(testService);
+      addTearDown(() {
+        MqttRemoteService.setMockInstance(null);
+        testService.dispose();
+      });
+
+      // Target device has an established local slug
+      await MqttSettings.setSlug('bedroom_display_tablet');
+
+      final backupData = <String, dynamic>{
+        'version': 3,
+        'settings': <String, dynamic>{},
+        'mqtt': <String, dynamic>{
+          'enabled': true,
+          'host': '192.168.1.99',
+          'port': 1883,
+          'username': 'fleet_user',
+          'password': 'secret_password',
+          'slug': 'foreign_source_tablet',
+          'discoveryEnabled': true,
+          'useTls': false,
+        },
+      };
+
+      await BackupService.importSettings(backupData);
+
+      // Yield event loop so unawaited(connectFromSettings()) completes
+      await Future<void>.delayed(Duration.zero);
+
+      expect(testService.connectionStatus, equals(MqttConnectionStatus.connected));
+      expect(fakeMqttClient.lastConfig?.host, equals('192.168.1.99'));
+      expect(fakeMqttClient.lastConfig?.port, equals(1883));
+      // Crucial: connects using the device-local slug, NOT the foreign backup slug!
+      expect(testService.slug, equals('bedroom_display_tablet'));
     });
   });
 
